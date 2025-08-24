@@ -1,6 +1,5 @@
 <?php require __DIR__ . '/../includes/conn.php'; require __DIR__.'/../includes/helpers.php'; require_admin(); include __DIR__.'/../includes/header.php';
 if(is_post()){
-    require __DIR__ . '/conexion.php'; // te deja $conexion listo
 
 $supplier=trim($_POST['supplier']??''); $st=$conexion->prepare('INSERT INTO purchases (supplier,total) VALUES (?,0)'); $st->bind_param('s',$supplier); $st->execute(); $pid=$st->insert_id;
 $sti=$conexion->prepare('INSERT INTO purchase_items (purchase_id,product_id,variant_id,cost,qty) VALUES (?,?,?,?,?)');

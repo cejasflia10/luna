@@ -1,4 +1,4 @@
-<?php require __DIR__ . '/../includes/conn.php'; require __DIR__ . '/conexion.php'; // te deja $conexion listo
+<?php require __DIR__ . '/../includes/conn.php';
 require __DIR__.'/../includes/helpers.php'; include __DIR__.'/../includes/header.php'; ?>
 
 <h1>¡Bienvenid@ a LUNA!</h1>

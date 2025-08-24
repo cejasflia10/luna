@@ -1,5 +1,4 @@
 <?php require __DIR__ . '/../includes/conn.php'; require __DIR__.'/../includes/helpers.php'; include __DIR__.'/../includes/header.php';
-require __DIR__ . '/conexion.php'; // te deja $conexion listo
 
 $id = (int)($_GET['id'] ?? 0);
 $st = $conexion->prepare('SELECT id,name,description,price FROM products WHERE id=? AND active=1');

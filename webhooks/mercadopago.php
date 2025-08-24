@@ -1,6 +1,5 @@
 <?php
 require __DIR__ . '/../includes/conn.php';
-require __DIR__ . '/conexion.php'; // te deja $conexion listo
 
 $raw = file_get_contents('php://input');
 $ev = json_decode($raw,true) ?: [];

@@ -1,6 +1,5 @@
 <?php require __DIR__ . '/../includes/conn.php'; require __DIR__.'/../includes/helpers.php'; require_admin(); include __DIR__.'/../includes/header.php';
 if(is_post()){
-    require __DIR__ . '/conexion.php'; // te deja $conexion listo
 
 $method=$_POST['method'] ?? 'efectivo'; $buyer=$_POST['buyer'] ?? 'Mostrador';
 $st=$conexion->prepare("INSERT INTO sales (channel,status,payment_method,subtotal,total_paid,buyer_name) VALUES ('presencial','paid',?,0,0,?)");
