@@ -1,5 +1,7 @@
 <?php require __DIR__ . '/../includes/conn.php'; require __DIR__.'/../includes/helpers.php'; require_admin(); include __DIR__.'/../includes/header.php';
 if(is_post()){
+    require __DIR__ . '/conexion.php'; // te deja $conexion listo
+
 $supplier=trim($_POST['supplier']??''); $st=$conexion->prepare('INSERT INTO purchases (supplier,total) VALUES (?,0)'); $st->bind_param('s',$supplier); $st->execute(); $pid=$st->insert_id;
 $sti=$conexion->prepare('INSERT INTO purchase_items (purchase_id,product_id,variant_id,cost,qty) VALUES (?,?,?,?,?)');
 $sum=0; foreach($_POST['items']??[] as $it){ $p=(int)$it['product_id']; $v=(int)$it['variant_id']; $c=(float)$it['cost']; $q=max(1,(int)$it['qty']); $sum += $c*$q; $sti->bind_param('iii di',$pid,$p,$v,$c,$q); $sti->execute(); $conexion->query('UPDATE product_variants SET stock=stock+'.$q.' WHERE id='.$v); }
@@ -25,4 +27,5 @@ row.innerHTML=`<div class="row"><div><label>Variante</label><select class="input
 wrap.appendChild(row); const sel=row.querySelector('select'); sel.innerHTML=opts; }
 addRow();
 </script>
+
 <?php include __DIR__.'/../includes/footer.php'; ?>

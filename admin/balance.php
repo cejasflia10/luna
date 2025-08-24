@@ -1,4 +1,6 @@
 <?php require __DIR__ . '/../includes/conn.php'; require __DIR__.'/../includes/helpers.php'; require_admin(); include __DIR__.'/../includes/header.php';
+require __DIR__ . '/conexion.php'; // te deja $conexion listo
+
 $ym = $_GET['ym'] ?? date('Y-m');
 $st = $conexion->prepare("SELECT
 IFNULL(SUM(s.total_paid),0) total_ventas,

@@ -1,4 +1,6 @@
 <?php require __DIR__ . '/../includes/conn.php'; require __DIR__.'/../includes/helpers.php'; require_admin(); include __DIR__.'/../includes/header.php';
+require __DIR__ . '/conexion.php'; // te deja $conexion listo
+
 if(is_post()){
 foreach(['TRANSFER_ALIAS','BANK_INFO','MP_ACCESS_TOKEN','STORE_NAME'] as $k){
 $v=trim($_POST[$k]??''); $ks=strtolower($k);

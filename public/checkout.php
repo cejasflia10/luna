@@ -1,4 +1,6 @@
 <?php require __DIR__ . '/../includes/conn.php'; require __DIR__.'/../includes/helpers.php';
+require __DIR__ . '/conexion.php'; // te deja $conexion listo
+
 $method = $_POST['method'] ?? 'mercadopago';
 
 
