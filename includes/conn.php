@@ -16,36 +16,35 @@ function parse_mysql_url($url){
   return $out;
 }
 
-// 1) Preferir MYSQL_URL (Railway)
-$cfg = parse_mysql_url(getenv('MYSQL_URL') ?: '');
+// 1) DB_* (como lo tenés en Railway)
+$cfg = [
+  'host' => getenv('DB_HOST'),
+  'port' => getenv('DB_PORT') ?: 3306,
+  'db'   => getenv('DB_NAME'),
+  'user' => getenv('DB_USER'),
+  'pass' => getenv('DB_PASS'),
+];
 
-// 2) Si no hay MYSQL_URL, usar variables sueltas Railway
+// 2) Fallback: MYSQL_URL o MYSQLHOST/...
+if (!$cfg['host'] || !$cfg['db'] || !$cfg['user']) {
+  $cfg = parse_mysql_url(getenv('MYSQL_URL') ?: '');
+}
 if (!$cfg['host']) {
-  $h = getenv('MYSQLHOST');
-  $po = getenv('MYSQLPORT');
-  $db = getenv('MYSQLDATABASE');
-  $us = getenv('MYSQLUSER');
+  $h = getenv('MYSQLHOST'); $po = getenv('MYSQLPORT');
+  $db = getenv('MYSQLDATABASE'); $us = getenv('MYSQLUSER');
   $pw = getenv('MYSQLPASSWORD') ?: getenv('MYSQL_ROOT_PASSWORD');
   if ($h && $db && $us) {
-    $cfg = [
-      'host' => $h,
-      'port' => $po ? (int)$po : 3306,
-      'db'   => $db,
-      'user' => $us,
-      'pass' => $pw,
-    ];
+    $cfg = ['host'=>$h,'port'=>$po? (int)$po:3306,'db'=>$db,'user'=>$us,'pass'=>$pw];
   }
 }
 
 if (!$cfg['host'] || !$cfg['db'] || !$cfg['user']) {
   http_response_code(500);
-  die('❌ Config DB incompleta. Definí MYSQL_URL o MYSQLHOST/MYSQLPORT/MYSQLDATABASE/MYSQLUSER/MYSQLPASSWORD.');
+  die('❌ Config DB incompleta. Revisá tus variables en Railway.');
 }
 
 try {
-  $conexion = new mysqli();
-  $conexion->options(MYSQLI_OPT_CONNECT_TIMEOUT, 10);
-  $conexion->real_connect($cfg['host'], $cfg['user'], $cfg['pass'], $cfg['db'], $cfg['port']);
+  $conexion = new mysqli($cfg['host'], $cfg['user'], $cfg['pass'], $cfg['db'], (int)$cfg['port']);
   @$conexion->set_charset('utf8mb4');
 } catch (mysqli_sql_exception $e) {
   http_response_code(500);
