@@ -10,10 +10,10 @@ require $root.'/includes/conn.php';
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
 
-/* ====== BASES WEB (NO redefinir url(), la define header.php) ======
-   - $PUBLIC_BASE: /public (funciona aunque estemos en /public/clientes)
-   - url_public($p): genera /public/$p
-   - urlc($p): genera /public/clientes/$p
+/* ====== BASES WEB ======
+   $PUBLIC_BASE: /public (funciona aunque estemos en /public/clientes)
+   url_public($p): /public/$p
+   urlc($p):       /public/clientes/$p
 */
 $script = $_SERVER['SCRIPT_NAME'] ?? '';
 $dir    = rtrim(dirname($script), '/\\'); // /.../public o /.../public/clientes
@@ -22,8 +22,7 @@ $PUBLIC_BASE = (preg_match('~/(clientes)(/|$)~', $dir)) ? rtrim(dirname($dir), '
 if (!function_exists('url_public')) {
   function url_public($path){
     global $PUBLIC_BASE;
-    $b = rtrim($PUBLIC_BASE, '/');
-    $p = '/'.ltrim((string)$path, '/');
+    $b = rtrim($PUBLIC_BASE, '/'); $p = '/'.ltrim((string)$path, '/');
     return ($b===''?'':$b).$p;
   }
 }
@@ -59,6 +58,29 @@ if ($db_ok) {
   }
 }
 
+/* ====== Palabras para el ROTADOR de promos ====== */
+$promo_words = ['Promos', 'Ofertas', 'Nueva temporada', 'Remeras', 'Pantalones', 'Camperas', 'Denim', 'Accesorios', 'Sale'];
+if ($db_ok && $has_products) {
+  $has_discount = (@$conexion->query("SHOW COLUMNS FROM products LIKE 'discount'")?->num_rows ?? 0) > 0;
+  $has_isoffer  = (@$conexion->query("SHOW COLUMNS FROM products LIKE 'is_offer'")?->num_rows ?? 0) > 0;
+  $has_promolbl = (@$conexion->query("SHOW COLUMNS FROM products LIKE 'promo_label'")?->num_rows ?? 0) > 0;
+
+  if ($has_discount || $has_isoffer || $has_promolbl) {
+    $conds = ["p.active=1"];
+    if ($has_discount)  $conds[] = "p.discount>0";
+    if ($has_isoffer)   $conds[] = "p.is_offer=1";
+    if ($has_promolbl)  $conds[] = "p.promo_label<>''";
+
+    $cond = implode(' OR ', array_slice($conds,1)); // solo las condiciones "promos"
+    $field = $has_promolbl ? "CASE WHEN COALESCE(p.promo_label,'')<>'' THEN p.promo_label ELSE p.name END" : "p.name";
+    $sqlw = "SELECT DISTINCT $field AS label FROM products p WHERE p.active=1 AND (".$cond.") ORDER BY p.id DESC LIMIT 20";
+    if ($rs = @$conexion->query($sqlw)) {
+      $tmp=[]; while($r=$rs->fetch_assoc()){ if(!empty($r['label'])) $tmp[]=$r['label']; }
+      if ($tmp) $promo_words = array_values(array_unique($tmp));
+    }
+  }
+}
+
 /* ====== Carrito en sesión ====== */
 $cart_count = isset($_SESSION['cart_count']) ? (int)$_SESSION['cart_count'] : 0;
 
@@ -71,7 +93,6 @@ $header_path = $root.'/includes/header.php';
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Luna — Tienda</title>
-  <!-- desde /public/clientes los assets viven en /public/assets -->
   <link rel="stylesheet" href="<?= url_public('assets/css/styles.css') ?>" />
   <link rel="icon" type="image/png" href="<?= url_public('assets/img/logo.png') ?>">
   <style>
@@ -85,6 +106,18 @@ $header_path = $root.'/includes/header.php';
     .pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--ring);border-radius:999px}
     nav.breadcrumb a{opacity:.8;text-decoration:none}
     nav.breadcrumb span{opacity:.5}
+    .hero{padding:18px 0 6px;text-align:center}
+
+    /* Rotador con destellos */
+    .rotator{display:inline-block;position:relative;font-weight:800;letter-spacing:.02em;animation:twinkle 2.4s ease-in-out infinite}
+    .rot-out{opacity:.08;filter:blur(1px);transition:opacity .26s linear,filter .26s linear}
+    @keyframes twinkle{0%,100%{text-shadow:0 0 0px #fff}50%{text-shadow:0 0 10px rgba(255,255,255,.7),0 0 28px rgba(255,255,255,.25)}}
+    .rotator::after{content:"";position:absolute;inset:-.15em;pointer-events:none;background:
+      radial-gradient(6px 6px at 20% 40%, rgba(255,255,255,.9), transparent 60%),
+      radial-gradient(5px 5px at 70% 30%, rgba(255,255,255,.7), transparent 60%),
+      radial-gradient(4px 4px at 45% 70%, rgba(255,255,255,.6), transparent 60%);
+      mix-blend-mode:screen;animation:spark 3.6s linear infinite;opacity:.7}
+    @keyframes spark{0%{transform:translateX(-6%) translateY(-2%);opacity:.6}50%{transform:translateX(6%) translateY(2%);opacity:.9}100%{transform:translateX(-6%) translateY(-2%);opacity:.6}}
   </style>
 </head>
 <body>
@@ -92,12 +125,18 @@ $header_path = $root.'/includes/header.php';
   <?php if (file_exists($header_path)) { require $header_path; } ?>
 
   <div class="container">
-    <nav class="breadcrumb" style="margin:8px 0 2px">
-      <a href="<?= url_public('index.php') ?>">Inicio</a> <span>›</span> <strong>Tienda</strong>
-    </nav>
+
+    <!-- HERO de la tienda con rotador -->
+    <section class="hero">
+      <h1 style="margin:0">
+        Ofertas:
+        <span class="rotator" id="promo-rot" aria-live="polite"></span>
+      </h1>
+      <div style="opacity:.85;margin-top:6px">Envíos a todo el país · Cambios fáciles · 3 y 6 cuotas</div>
+    </section>
 
     <header class="tienda">
-      <h1 style="margin:0">🛍️ Tienda</h1>
+      <h2 style="margin:0">🛍️ Productos</h2>
       <a class="pill" href="<?= urlc('carrito.php') ?>">🛒 Carrito <b><?= $cart_count ?></b></a>
     </header>
 
@@ -135,6 +174,27 @@ $header_path = $root.'/includes/header.php';
       </div></div>
     <?php endif; ?>
   </div>
+
+  <!-- Rotador JS (ligero, sin dependencias) -->
+  <script>
+  (function(){
+    // Palabras provenientes de la BD (o fallback)
+    const WORDS = <?= json_encode(array_values(array_unique($promo_words)), JSON_UNESCAPED_UNICODE) ?>;
+    const el = document.getElementById('promo-rot');
+    if (!el || !WORDS.length) return;
+    let i = 0;
+    const interval = 2200, fade = 260;
+    el.textContent = WORDS[0];
+    setInterval(()=>{
+      el.classList.add('rot-out');
+      setTimeout(()=>{
+        i = (i + 1) % WORDS.length;
+        el.textContent = WORDS[i];
+        el.classList.remove('rot-out');
+      }, fade);
+    }, interval);
+  })();
+  </script>
 
 </body>
 </html>

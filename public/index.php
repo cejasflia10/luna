@@ -1,12 +1,10 @@
 <?php
 if (session_status()===PHP_SESSION_NONE) session_start();
 
-/* ========= Resolver $root de forma robusta =========
-   Sube hasta 4 niveles buscando /includes/conn.php para evitar
-   errores tipo: C:\...\public/includes/conn.php no existe */
+/* ========= Resolver $root robusto ========= */
 $root = __DIR__;
-for ($i=0; $i<4; $i++) {
-  if (file_exists($root.'/includes/conn.php')) { break; }
+for ($i=0; $i<6; $i++) {
+  if (file_exists($root.'/includes/conn.php')) break;
   $root = dirname($root);
 }
 @require $root.'/includes/conn.php';
@@ -16,17 +14,19 @@ for ($i=0; $i<4; $i++) {
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
 
-/* ========= BASE dinámica (localhost / subcarpeta / Render) ========= */
-$script = isset($_SERVER['SCRIPT_NAME']) ? $_SERVER['SCRIPT_NAME'] : '';
-$BASE   = rtrim(dirname($script), '/\\'); // puede ser '/', '/public', '/tienda', etc.
+/* ========= BASE / URL helpers (sin duplicar /clientes) ========= */
+$script = $_SERVER['SCRIPT_NAME'] ?? '';
+$dir    = rtrim(dirname($script), '/\\');                 // /.../public  o  /.../public/clientes
+$PUBLIC_BASE = preg_match('~/(clientes)(/|$)~', $dir) ? rtrim(dirname($dir), '/\\') : $dir;
 
-if (!function_exists('url')) {
-  function url($path){
-    global $BASE;
-    $b = rtrim($BASE, '/');          // evita doble barra
-    $p = '/'.ltrim((string)$path,'/'); // fuerza slash inicial
-    return ($b === '' ? '' : $b).$p;  // si BASE === '' -> relativo a raíz
+if (!function_exists('url_public')) {
+  function url_public($path){
+    global $PUBLIC_BASE;
+    return rtrim($PUBLIC_BASE,'/').'/'.ltrim((string)$path,'/');
   }
+}
+if (!function_exists('urlc')) { // por si querés linkear a la tienda
+  function urlc($path){ return url_public('clientes/'.ltrim((string)$path,'/')); }
 }
 
 /* ========= Chequeos de esquema ========= */
@@ -62,12 +62,10 @@ if ($db_ok) {
   }
 }
 
-/* ========= Indicador de pedidos nuevos (tolerante a esquema) ========= */
+/* ========= Indicador de pedidos nuevos ========= */
 $newCount = 0;
 if ($db_ok) {
-  // SALES
-  $q = @$conexion->query("SHOW TABLES LIKE 'sales'");
-  $has_sales = ($q && $q->num_rows>0);
+  $q = @$conexion->query("SHOW TABLES LIKE 'sales'"); $has_sales = ($q && $q->num_rows>0);
   if ($has_sales) {
     $has_status = !!(@$conexion->query("SHOW COLUMNS FROM sales LIKE 'status'")->num_rows ?? 0);
     $has_created_sales = !!(@$conexion->query("SHOW COLUMNS FROM sales LIKE 'created_at'")->num_rows ?? 0);
@@ -79,9 +77,7 @@ if ($db_ok) {
       if ($rs) $newCount += (int)$rs->fetch_assoc()['c'];
     }
   }
-  // RESERVATIONS
-  $q = @$conexion->query("SHOW TABLES LIKE 'reservations'");
-  $has_res = ($q && $q->num_rows>0);
+  $q = @$conexion->query("SHOW TABLES LIKE 'reservations'"); $has_res = ($q && $q->num_rows>0);
   if ($has_res) {
     $has_rstatus  = !!(@$conexion->query("SHOW COLUMNS FROM reservations LIKE 'status'")->num_rows ?? 0);
     $has_rcreated = !!(@$conexion->query("SHOW COLUMNS FROM reservations LIKE 'created_at'")->num_rows ?? 0);
@@ -95,8 +91,14 @@ if ($db_ok) {
   }
 }
 
-/* ========= Resolver header.php de forma segura ========= */
+/* ========= Header ========= */
 $header_path = $root.'/includes/header.php';
+
+/* ========= Palabras para rotador (admin) ========= */
+$rot_words = [
+  'Gestión simple', 'Stock al día', 'Carga en segundos',
+  'Reportes claros', 'Más ventas', 'Control total'
+];
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -104,8 +106,8 @@ $header_path = $root.'/includes/header.php';
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Luna — Inicio</title>
-  <link rel="stylesheet" href="<?= url('assets/css/styles.css') ?>" />
-  <link rel="icon" type="image/png" href="<?= url('assets/img/logo.png') ?>">
+  <link rel="stylesheet" href="<?= url_public('assets/css/styles.css') ?>" />
+  <link rel="icon" type="image/png" href="<?= url_public('assets/img/logo.png') ?>">
   <style>
     .pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--ring);border-radius:999px}
     .pill b{font-weight:700}
@@ -116,6 +118,17 @@ $header_path = $root.'/includes/header.php';
     .cta{display:inline-block;padding:.6rem 1rem;border:1px solid var(--ring);border-radius:10px;text-decoration:none}
     .container{max-width:1100px;margin:0 auto;padding:0 14px}
     .hero{padding:36px 0;text-align:center}
+
+    /* ==== Rotador con destellos ==== */
+    .rotator{display:inline-block;position:relative;font-weight:800;letter-spacing:.02em;animation:twinkle 2.4s ease-in-out infinite}
+    .rot-out{opacity:.08;filter:blur(1px);transition:opacity .26s linear,filter .26s linear}
+    @keyframes twinkle{0%,100%{text-shadow:0 0 0px #fff}50%{text-shadow:0 0 10px rgba(255,255,255,.7),0 0 28px rgba(255,255,255,.25)}}
+    .rotator::after{content:"";position:absolute;inset:-.15em;pointer-events:none;background:
+      radial-gradient(6px 6px at 20% 40%, rgba(255,255,255,.9), transparent 60%),
+      radial-gradient(5px 5px at 70% 30%, rgba(255,255,255,.7), transparent 60%),
+      radial-gradient(4px 4px at 45% 70%, rgba(255,255,255,.6), transparent 60%);
+      mix-blend-mode:screen;animation:spark 3.6s linear infinite;opacity:.7}
+    @keyframes spark{0%{transform:translateX(-6%) translateY(-2%);opacity:.6}50%{transform:translateX(6%) translateY(2%);opacity:.9}100%{transform:translateX(-6%) translateY(-2%);opacity:.6}}
   </style>
 </head>
 <body>
@@ -125,16 +138,15 @@ $header_path = $root.'/includes/header.php';
   <!-- HERO -->
   <header class="hero">
     <div class="container">
-      <h1>Moda que inspira. Gestión simple.</h1>
+      <h1 style="margin-bottom:.4rem">
+        Moda que inspira.
+        <span class="rotator" id="hero-rot" aria-live="polite"></span>
+      </h1>
       <p>Cargá productos, controlá stock, vendé online o presencial y mirá tus ganancias en segundos.</p>
 
       <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
-        <a class="cta" href="<?= url('productos.php') ?>">➕ Cargar producto</a>
-
-        <!-- 🔗 Acceso directo a TIENDA (clientes) -->
-        <a class="cta" href="<?= url('clientes/index.php') ?>">🛍️ Ir a la tienda</a>
-
-        <!-- 🔔 Indicador de nuevos pedidos/reservas (si hay) -->
+        <a class="cta" href="<?= url_public('productos.php') ?>">➕ Cargar producto</a>
+        <a class="cta" href="<?= urlc('index.php') ?>">🛍️ Ir a la tienda</a>
         <?php if($newCount>0): ?>
           <span class="pill">🔔 <b><?= (int)$newCount ?></b> nuevo<?= $newCount>1?'s':'' ?> (pedidos / reservas)</span>
         <?php endif; ?>
@@ -156,7 +168,6 @@ $header_path = $root.'/includes/header.php';
         <?php while($p=$prods->fetch_assoc()): ?>
           <div class="card">
             <?php
-              // Placeholder seguro por si no hay image_url
               $img = ($has_image_url && !empty($p['image_url']))
                     ? $p['image_url']
                     : ('https://picsum.photos/seed/'.(int)$p['id'].'/640/480');
@@ -174,7 +185,7 @@ $header_path = $root.'/includes/header.php';
       </div>
     <?php else: ?>
       <div class="card" style="padding:14px;margin-bottom:12px"><div class="p">
-        <b>Sin productos aún.</b> Creá el primero desde <a class="cta" href="<?= url('productos.php') ?>">Productos</a>.
+        <b>Sin productos aún.</b> Creá el primero desde <a class="cta" href="<?= url_public('productos.php') ?>">Productos</a>.
       </div></div>
       <div class="grid">
         <?php foreach([101,102,103,104,105,106] as $seed): ?>
@@ -189,6 +200,26 @@ $header_path = $root.'/includes/header.php';
       </div>
     <?php endif; ?>
   </main>
+
+  <!-- Rotador JS (ligero, sin dependencias) -->
+  <script>
+  (function(){
+    const WORDS = <?= json_encode($rot_words, JSON_UNESCAPED_UNICODE) ?>;
+    const el = document.getElementById('hero-rot');
+    if (!el || !WORDS.length) return;
+    let i = 0;
+    const interval = 2200, fade = 260;
+    el.textContent = WORDS[0];
+    setInterval(()=>{
+      el.classList.add('rot-out');
+      setTimeout(()=>{
+        i = (i + 1) % WORDS.length;
+        el.textContent = WORDS[i];
+        el.classList.remove('rot-out');
+      }, fade);
+    }, interval);
+  })();
+  </script>
 
 </body>
 </html>

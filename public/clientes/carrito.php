@@ -229,7 +229,6 @@ $header_path = $root.'/includes/header.php';
     <?php endif; ?>
 
     <nav class="breadcrumb" style="margin:8px 0 2px">
-      <a href="<?= url_public('index.php') ?>">Inicio</a> <span>›</span>
       <a href="<?= urlc('index.php') ?>">Tienda</a> <span>›</span>
       <strong>Carrito</strong>
     </nav>

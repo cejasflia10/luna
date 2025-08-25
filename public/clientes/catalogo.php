@@ -100,10 +100,6 @@ $header_path = $root.'/includes/header.php';
 
   <?php if (file_exists($header_path)) { require $header_path; } ?>
 
-  <div class="container">
-    <nav class="breadcrumb" style="margin:8px 0 2px">
-      <a href="<?= url('../index.php') ?>">Inicio</a> <span>›</span> <strong>Catálogo</strong>
-    </nav>
 
     <header class="hd">
       <h1 style="margin:0">📒 Catálogo</h1>
