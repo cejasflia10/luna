@@ -3,7 +3,7 @@ if (session_status()===PHP_SESSION_NONE) session_start();
 ?><!DOCTYPE html>
 <html lang="es"><head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Luna Shop — Ventas</title>
+  <title>Luna Shop — Compras</title>
   <link rel="stylesheet" href="assets/css/styles.css">
 </head><body>
   <div class="nav"><div class="row container">
@@ -15,7 +15,7 @@ if (session_status()===PHP_SESSION_NONE) session_start();
     <a href="reportes.php">Reportes</a>
   </div></div>
   <header class="hero"><div class="container">
-    <h1>Ventas</h1><p>Registro de ventas y pagos.</p>
+    <h1>Compras</h1><p>Entradas de stock.</p>
   </div></header>
   <main class="container">
     <div class="card" style="padding:14px"><div class="p">
