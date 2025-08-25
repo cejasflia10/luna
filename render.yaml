@@ -1,27 +1,21 @@
+# render.yaml
 services:
   - type: web
-    name: luna-tienda
+    name: luna-shop
     env: docker
-    plan: starter
     autoDeploy: true
+    plan: starter
+    healthCheckPath: /
     envVars:
-      - key: DB_HOST
+      - key: MYSQL_URL           # mysql://user:pass@host:port/db
         sync: false
-      - key: DB_PORT
-        sync: false
-      - key: DB_NAME
-        sync: false
-      - key: DB_USER
-        sync: false
-      - key: DB_PASS
-        sync: false
-      - key: MP_ACCESS_TOKEN
-        sync: false
-      - key: STORE_NAME
-        value: "LUNA — Tienda de Ropa"
-      - key: CURRENCY
-        value: "ARS"
-      - key: TRANSFER_ALIAS
-        value: "voleyppp"
-      - key: BANK_INFO
-        value: "Alias: voleyppp · Titular: LUNA"
+      # O, si preferís individuales:
+      # - { key: MYSQLHOST,     sync: false }
+      # - { key: MYSQLPORT,     sync: false }
+      # - { key: MYSQLDATABASE, sync: false }
+      # - { key: MYSQLUSER,     sync: false }
+      # - { key: MYSQLPASSWORD, sync: false }
+    disks:
+      - name: uploads
+        mountPath: /var/www/html/public/uploads
+        sizeGB: 2
