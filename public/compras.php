@@ -115,7 +115,9 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')==='create_pu
 <link rel="stylesheet" href="assets/css/styles.css">
 </head><body>
 <div class="nav"><div class="row container">
-  <a class="brand" href="index.php">Luna<span class="dot">•</span>Shop</a>
+<a class="brand" href="index.php" aria-label="Inicio">
+  <img src="assets/img/logo.png" alt="Luna Clothing" style="height:40px;display:block">
+</a>
   <div style="flex:1"></div>
   <a href="productos.php">Productos</a>
   <a href="compras.php">Compras</a>
