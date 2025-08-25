@@ -1,8 +1,33 @@
 <?php
 if (session_status()===PHP_SESSION_NONE) session_start();
-require dirname(__DIR__).'/includes/conn.php';
 
-function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+$root = dirname(__DIR__);
+require $root.'/includes/conn.php';
+require $root.'/includes/helpers.php';
+require $root.'/includes/page_head.php'; // HERO unificado
+
+/* Helpers por si faltan */
+if (!function_exists('h')) { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
+
+/* Rutas dinámicas (localhost/Render) */
+$BASE = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/\\');
+if (!function_exists('url')) {
+  function url($p){ global $BASE; return $BASE.'/'.ltrim($p,'/'); }
+}
+
+/* ====== Flags de DB/esquema ====== */
+$db_ok = isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno;
+$has_categories = $has_products = $has_created = false;
+
+if ($db_ok) {
+  $has_categories = !!(@$conexion->query("SHOW TABLES LIKE 'categories'")->num_rows ?? 0);
+  $has_products   = !!(@$conexion->query("SHOW TABLES LIKE 'products'")->num_rows ?? 0);
+  if ($has_categories) {
+    $has_created = !!(@$conexion->query("SHOW COLUMNS FROM categories LIKE 'created_at'")->num_rows ?? 0);
+  }
+}
+
+/* ====== Utilidades ====== */
 function slugify($text){
   $text = iconv('UTF-8','ASCII//TRANSLIT', $text);
   $text = preg_replace('~[^\\pL\\d]+~u', '-', $text);
@@ -14,7 +39,8 @@ function slugify($text){
 
 $okMsg = $errMsg = '';
 
-if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')==='create') {
+/* ====== Crear categoría ====== */
+if ($db_ok && $has_categories && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')==='create') {
   try {
     $name = trim($_POST['name'] ?? '');
     if ($name==='') throw new Exception('El nombre es obligatorio.');
@@ -26,76 +52,97 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')==='create') 
   } catch(Throwable $e){ $errMsg = "❌ ".$e->getMessage(); }
 }
 
-if (isset($_GET['toggle'])) {
+/* ====== Alternar activo ====== */
+if ($db_ok && $has_categories && isset($_GET['toggle'])) {
   $id = (int)$_GET['toggle'];
-  $conexion->query("UPDATE categories SET active=1-active WHERE id=".$id);
-  header('Location: categorias.php'); exit;
+  @$conexion->query("UPDATE categories SET active=1-active WHERE id=".$id);
+  header('Location: '.url('categorias.php')); exit;
 }
 
-if (isset($_GET['delete'])) {
+/* ====== Eliminar ====== */
+if ($db_ok && $has_categories && isset($_GET['delete'])) {
   $id = (int)$_GET['delete'];
-  $rs = $conexion->query("SELECT COUNT(*) c FROM products WHERE category_id=".$id);
-  $c = $rs ? (int)$rs->fetch_assoc()['c'] : 0;
-  if ($c>0) { $errMsg = "❌ No se puede borrar: hay productos en esta categoría."; }
-  else { $conexion->query("DELETE FROM categories WHERE id=".$id); header('Location: categorias.php'); exit; }
+  if ($has_products) {
+    $rs = @$conexion->query("SELECT COUNT(*) c FROM products WHERE category_id=".$id);
+    $c = $rs ? (int)$rs->fetch_assoc()['c'] : 0;
+  } else {
+    $c = 0; // si no existe products, permitimos borrar
+  }
+  if ($c>0) {
+    $errMsg = "❌ No se puede borrar: hay productos en esta categoría.";
+  } else {
+    @$conexion->query("DELETE FROM categories WHERE id=".$id);
+    header('Location: '.url('categorias.php')); exit;
+  }
 }
 
-$cats = $conexion->query("SELECT id,name,slug,active,created_at FROM categories ORDER BY active DESC, name ASC");
+/* ====== Listado ====== */
+$cats = null;
+if ($db_ok && $has_categories) {
+  $order = $has_created ? "active DESC, name ASC" : "active DESC, name ASC";
+  $selectCreated = $has_created ? "created_at" : "NULL AS created_at";
+  $cats = @$conexion->query("SELECT id,name,slug,active,$selectCreated FROM categories ORDER BY $order");
+}
 ?>
-<!DOCTYPE html><html lang="es"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Luna Shop — Categorías</title>
-<link rel="stylesheet" href="assets/css/styles.css">
-</head><body>
-<div class="nav"><div class="row container">
-<a class="brand" href="index.php" aria-label="Inicio">
-  <img src="assets/img/logo.png" alt="Luna Clothing" style="height:40px;display:block">
-</a>
-  <div style="flex:1"></div>
-  <a href="productos.php">Productos</a>
-  <a href="compras.php">Compras</a>
-  <a href="ventas.php">Ventas</a>
-  <a href="reportes.php">Reportes</a>
-  <a href="categorias.php">Categorías</a>
-</div></div>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Luna — Categorías</title>
+  <link rel="stylesheet" href="<?=url('assets/css/styles.css')?>">
+  <link rel="icon" type="image/png" href="<?=url('assets/img/logo.png')?>">
+</head>
+<body>
 
-<header class="hero"><div class="container">
-  <h1>Categorías</h1>
-  <p>Creá y administrá las categorías del catálogo.</p>
-</div></header>
+<?php require $root.'/includes/header.php'; ?>
+
+<?php
+page_head('Categorías', 'Creá y administrá las categorías del catálogo.');
+?>
 
 <main class="container">
-  <?php if($okMsg): ?><div class="kpi"><div class="box"><b>OK</b><?=h($okMsg)?></div></div><?php endif; ?>
-  <?php if($errMsg): ?><div class="kpi"><div class="box"><b>Error</b><?=h($errMsg)?></div></div><?php endif; ?>
+  <?php if(!$db_ok): ?>
+    <div class="kpi"><div class="box"><b>Error</b> ❌ No se pudo conectar a la base de datos.</div></div>
+  <?php elseif(!$has_categories): ?>
+    <div class="kpi"><div class="box"><b>Falta tabla</b> ❌ No existe la tabla <code>categories</code>. Ejecutá el <code>schema.sql</code>.</div></div>
+  <?php endif; ?>
+
+  <?php if($okMsg): ?><div class="kpi"><div class="box"><b>OK</b> <?=h($okMsg)?></div></div><?php endif; ?>
+  <?php if($errMsg): ?><div class="kpi"><div class="box"><b>Error</b> <?=h($errMsg)?></div></div><?php endif; ?>
 
   <h2>➕ Nueva categoría</h2>
-  <form method="post" class="card" style="padding:14px;max-width:640px">
+  <form method="post" class="card" style="padding:14px;max-width:640px" <?= ($db_ok && $has_categories)?'':'onSubmit="return false;"'?>>
     <input type="hidden" name="__action" value="create">
     <label>Nombre
-      <input class="input" name="name" required placeholder="Ej: Remeras">
+      <input class="input" name="name" required placeholder="Ej: Remeras" <?= ($db_ok && $has_categories)?'':'disabled'?>>
     </label>
-    <button type="submit">Guardar</button>
+    <button type="submit" <?= ($db_ok && $has_categories)?'':'disabled'?> >Guardar</button>
   </form>
 
-  <h2 style="margin-top:20px">Listado</h2>
-  <table class="table">
-    <thead><tr><th>Nombre</th><th>Slug</th><th>Estado</th><th>Creada</th><th></th></tr></thead>
-    <tbody>
-      <?php if($cats && $cats->num_rows>0): while($c=$cats->fetch_assoc()): ?>
-      <tr>
-        <td><?=h($c['name'])?></td>
-        <td><?=h($c['slug'])?></td>
-        <td><?= $c['active'] ? 'Activa' : 'Inactiva' ?></td>
-        <td><?=h($c['created_at'])?></td>
-        <td style="white-space:nowrap">
-          <a href="categorias.php?toggle=<?=$c['id']?>">Alternar</a> &nbsp;|&nbsp;
-          <a href="categorias.php?delete=<?=$c['id']?>" onclick="return confirm('¿Eliminar categoría? Solo si no tiene productos.');">Eliminar</a>
-        </td>
-      </tr>
-      <?php endwhile; else: ?>
-      <tr><td colspan="5">Sin categorías aún.</td></tr>
-      <?php endif; ?>
-    </tbody>
-  </table>
+  <h2 class="mt-3">Listado</h2>
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Nombre</th><th>Slug</th><th>Estado</th><th>Creada</th><th></th></tr></thead>
+      <tbody>
+        <?php if($cats && $cats->num_rows>0): while($c=$cats->fetch_assoc()): ?>
+        <tr>
+          <td><?=h($c['name'])?></td>
+          <td><?=h($c['slug'])?></td>
+          <td><?= $c['active'] ? 'Activa' : 'Inactiva' ?></td>
+          <td><?=h($c['created_at'] ?: '—')?></td>
+          <td style="white-space:nowrap">
+            <a href="<?=url('categorias.php?toggle='.(int)$c['id'])?>">Alternar</a> &nbsp;|&nbsp;
+            <a href="<?=url('categorias.php?delete='.(int)$c['id'])?>" onclick="return confirm('¿Eliminar categoría? Solo si no tiene productos.');">Eliminar</a>
+          </td>
+        </tr>
+        <?php endwhile; else: ?>
+        <tr><td colspan="5">Sin categorías aún.</td></tr>
+        <?php endif; ?>
+      </tbody>
+    </table>
+  </div>
 </main>
-</body></html>
+
+<?php require $root.'/includes/footer.php'; ?>
+</body>
+</html>
