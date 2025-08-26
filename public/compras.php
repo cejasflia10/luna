@@ -4,7 +4,7 @@ if (session_status()===PHP_SESSION_NONE) session_start();
 $root = dirname(__DIR__);
 require $root.'/includes/conn.php';
 require $root.'/includes/helpers.php';
-require $root.'/includes/page_head.php'; // HERO unificado
+require $root.'/includes/page_head.php';
 
 /* ===== Helpers ===== */
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
@@ -21,33 +21,36 @@ $db_ok = isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_
 
 /* ===== Utilidades tolerantes al esquema ===== */
 function t_exists($table){
-  global $conexion;
-  $rs = @$conexion->query("SHOW TABLES LIKE '$table'");
-  return ($rs && $rs->num_rows>0);
+  global $conexion; $rs=@$conexion->query("SHOW TABLES LIKE '$table'"); return ($rs && $rs->num_rows>0);
 }
 function table_cols($table){
-  global $conexion; $out=[];
-  if ($rs=@$conexion->query("SHOW COLUMNS FROM `$table`")) {
-    while($r=$rs->fetch_assoc()) $out[$r['Field']]=true;
-  }
-  return $out;
+  global $conexion; $out=[]; if ($rs=@$conexion->query("SHOW COLUMNS FROM `$table`")) { while($r=$rs->fetch_assoc()) $out[$r['Field']]=$r; } return $out;
 }
-function hascol($table,$col){
-  global $conexion;
-  $rs = @$conexion->query("SHOW COLUMNS FROM `$table` LIKE '$col'");
-  return ($rs && $rs->num_rows>0);
-}
-function infer_type($v){
-  if (is_int($v)) return 'i';
-  if (is_float($v)) return 'd';
-  if (is_numeric($v)) return (str_contains((string)$v,'.')?'d':'i');
-  return 's';
+function hascol($table,$col){ global $conexion; $rs=@$conexion->query("SHOW COLUMNS FROM `$table` LIKE '$col'"); return ($rs && $rs->num_rows>0); }
+function infer_type($v){ if (is_int($v)) return 'i'; if (is_float($v)) return 'd'; if (is_numeric($v)) return (str_contains((string)$v,'.')?'d':'i'); return 's'; }
+function default_for_type($mysqlType){
+  $t = strtolower($mysqlType);
+  if (str_starts_with($t,'int')||str_starts_with($t,'tinyint')||str_starts_with($t,'smallint')||str_starts_with($t,'bigint')) return 0;
+  if (str_starts_with($t,'decimal')||str_starts_with($t,'float')||str_starts_with($t,'double')) return 0.0;
+  if (str_starts_with($t,'datetime')||str_starts_with($t,'timestamp')) return date('Y-m-d H:i:s');
+  if (str_starts_with($t,'date')) return date('Y-m-d');
+  if (str_starts_with($t,'time')) return date('H:i:s');
+  return ''; // char, varchar, text, etc.
 }
 function insert_filtered($table, $data){
   global $conexion;
-  $cols_exist = table_cols($table);
+  $cols_info = table_cols($table);
   $data2 = [];
-  foreach($data as $k=>$v){ if(isset($cols_exist[$k])) $data2[$k]=$v; }
+  foreach($data as $k=>$v){ if(isset($cols_info[$k])) $data2[$k]=$v; }
+
+  // Rellenar columnas NOT NULL sin default que falten
+  foreach ($cols_info as $name=>$info) {
+    $isNotNull = (strtoupper($info['Null']??'YES')==='NO');
+    $hasDefault= !is_null($info['Default']);
+    if ($isNotNull && !$hasDefault && !array_key_exists($name,$data2)) {
+      $data2[$name] = default_for_type($info['Type'] ?? 'varchar(255)');
+    }
+  }
   if (!$data2) throw new Exception("No hay columnas compatibles para `$table`.");
 
   $cols = array_keys($data2);
@@ -66,19 +69,16 @@ function insert_filtered($table, $data){
 /* ===== Datos para selects ===== */
 $has_categories = $db_ok && t_exists('categories');
 $cats = null;
-if ($has_categories) {
-  $cats = @$conexion->query("SELECT id,name FROM categories WHERE active=1 ORDER BY name ASC");
-}
-/* habilitar input de medidas si existe measure_text o medidas */
+if ($has_categories) $cats = @$conexion->query("SELECT id,name FROM categories WHERE active=1 ORDER BY name ASC");
+
+/* mostrar input de medidas si existe measure_text o medidas */
 $has_measure_input = $db_ok && (hascol('product_variants','measure_text') || hascol('product_variants','medidas'));
 
 /* ===== Alta de compra + creación producto/variante ===== */
 $okMsg=$errMsg=''; $created=[];
 if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')==='create_purchase') {
   try {
-    if (!t_exists('products') || !t_exists('product_variants')) {
-      throw new Exception('Faltan tablas mínimas: products y/o product_variants.');
-    }
+    if (!t_exists('products') || !t_exists('product_variants')) throw new Exception('Faltan tablas mínimas: products y/o product_variants.');
 
     /* Imagen (archivo o URL) */
     $image_url = trim($_POST['image_url'] ?? '');
@@ -92,14 +92,11 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
         $baseDir   = $root.'/public/uploads';
         $subDir    = date('Y').'/'.date('m');
         $targetDir = $baseDir.'/'.$subDir;
-        if (!is_dir($targetDir) && !@mkdir($targetDir, 0777, true))
-          throw new Exception('No se pudo crear la carpeta de uploads.');
+        if (!is_dir($targetDir) && !@mkdir($targetDir, 0777, true)) throw new Exception('No se pudo crear la carpeta de uploads.');
 
         $nameFile  = bin2hex(random_bytes(8)).$allowed[$f['type']];
-        if (!@move_uploaded_file($f['tmp_name'], $targetDir.'/'.$nameFile))
-          throw new Exception('No se pudo guardar la imagen.');
-
-        $image_url = 'uploads/'.$subDir.'/'.$nameFile; // relativa a /public
+        if (!@move_uploaded_file($f['tmp_name'], $targetDir.'/'.$nameFile)) throw new Exception('No se pudo guardar la imagen.');
+        $image_url = 'uploads/'.$subDir.'/'.$nameFile;
       } elseif ($f['error'] !== UPLOAD_ERR_NO_FILE) {
         throw new Exception('Error al subir la imagen (código '.$f['error'].').');
       }
@@ -127,49 +124,46 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
 
     $conexion->begin_transaction();
 
-    /* SKU para products: siempre mandamos algo */
-    $sku_for_product = $sku;
-    if ($sku_for_product === '') {
-      $sku_for_product = 'P'.date('ymdHis').'-'.strtoupper(substr(bin2hex(random_bytes(3)),0,6));
-    }
+    /* SKU para products: siempre mandamos algo por si products.sku es NOT NULL */
+    $sku_for_product = $sku !== '' ? $sku : ('P'.date('ymdHis').'-'.strtoupper(substr(bin2hex(random_bytes(3)),0,6)));
 
-    /* INSERT products (sólo columnas existentes) */
+    /* INSERT products (solo columnas existentes) */
     $product_id = insert_filtered('products', [
       'name'        => $name,
       'description' => $desc,
       'image_url'   => $image_url,
       'active'      => 1,
       'category_id' => $catId,
-      'sku'         => $sku_for_product,   // por si products.sku es NOT NULL
+      'sku'         => $sku_for_product,
     ]);
 
-    /* ---- INSERT product_variants con mapeo de sinónimos ---- */
+    /* ===== INSERT product_variants con mapeo doble (si coexisten las columnas, se setean ambas) ===== */
     $pv = [
       'product_id' => $product_id,
       'sku'        => $sku,
       'color'      => $color,
+      // precios / stock / costo
+      'price'      => $sale_price,
+      'avg_cost'   => $unit_cost,
+      'stock'      => $qty,
     ];
-    /* size ↔ talla */
-    if (hascol('product_variants','size'))        { $pv['size'] = $size; }
-    elseif (hascol('product_variants','talla'))   { $pv['talla'] = $size; }
-    /* measure_text ↔ medidas */
-    if (hascol('product_variants','measure_text')){ $pv['measure_text'] = $meas; }
-    elseif (hascol('product_variants','medidas')) { $pv['medidas'] = $meas; }
-    /* price ↔ precio */
-    if (hascol('product_variants','price'))       { $pv['price'] = $sale_price; }
-    elseif (hascol('product_variants','precio'))  { $pv['precio'] = $sale_price; }
-    /* stock ↔ existencia */
-    if (hascol('product_variants','stock'))       { $pv['stock'] = $qty; }
-    elseif (hascol('product_variants','existencia')) { $pv['existencia'] = $qty; }
-    /* avg_cost / average_cost / costo_promedio / costo_prom */
-    if (hascol('product_variants','avg_cost'))          { $pv['avg_cost'] = $unit_cost; }
-    elseif (hascol('product_variants','average_cost'))  { $pv['average_cost'] = $unit_cost; }
-    elseif (hascol('product_variants','costo_promedio')){ $pv['costo_promedio'] = $unit_cost; }
-    elseif (hascol('product_variants','costo_prom'))    { $pv['costo_prom'] = $unit_cost; }
+    // sinónimos: setear AMBAS si existen
+    if (hascol('product_variants','size'))      $pv['size']   = $size;
+    if (hascol('product_variants','talla'))     $pv['talla']  = $size;
+
+    if (hascol('product_variants','measure_text')) $pv['measure_text'] = $meas;
+    if (hascol('product_variants','medidas'))      $pv['medidas']      = $meas;
+
+    if (hascol('product_variants','precio'))    $pv['precio']    = $sale_price;
+    if (hascol('product_variants','existencia'))$pv['existencia']= $qty;
+
+    if (hascol('product_variants','average_cost'))   $pv['average_cost']   = $unit_cost;
+    if (hascol('product_variants','costo_promedio')) $pv['costo_promedio'] = $unit_cost;
+    if (hascol('product_variants','costo_prom'))     $pv['costo_prom']     = $unit_cost;
 
     $variant_id = insert_filtered('product_variants', $pv);
 
-    /* Registrar compra si existen las tablas (también con mapeo) */
+    /* Registrar compra si existen las tablas */
     if (t_exists('purchases') && t_exists('purchase_items')) {
       $p_date_col = hascol('purchases','purchased_at') ? 'purchased_at' : (hascol('purchases','created_at') ? 'created_at' : null);
       $pdata = [];
@@ -179,49 +173,35 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
       if (hascol('purchases','status'))   $pdata['status']   = 'done';
       if (hascol('purchases','total'))    $pdata['total']    = $unit_cost * $qty;
 
-      if ($pdata) {
-        $purchase_id = insert_filtered('purchases', $pdata);
+      $purchase_id = insert_filtered('purchases', $pdata);
 
-        $pi = ['purchase_id'=>$purchase_id];
-        if (hascol('purchase_items','variant_id')) $pi['variant_id'] = $variant_id;
-        if (hascol('purchase_items','product_id')) $pi['product_id'] = $product_id;
+      $pi = ['purchase_id'=>$purchase_id];
+      if (hascol('purchase_items','variant_id')) $pi['variant_id'] = $variant_id;
+      if (hascol('purchase_items','product_id')) $pi['product_id'] = $product_id;
 
-        if (hascol('purchase_items','quantity')) $pi['quantity'] = $qty;
-        elseif (hascol('purchase_items','qty'))  $pi['qty']      = $qty;
+      if (hascol('purchase_items','quantity')) $pi['quantity'] = $qty; elseif (hascol('purchase_items','qty')) $pi['qty']=$qty;
 
-        if (hascol('purchase_items','unit_cost'))      $pi['unit_cost']  = $unit_cost;
-        elseif (hascol('purchase_items','cost_unit'))  $pi['cost_unit']  = $unit_cost;
-        elseif (hascol('purchase_items','price_unit')) $pi['price_unit'] = $unit_cost;
+      if (hascol('purchase_items','unit_cost')) $pi['unit_cost']=$unit_cost;
+      if (hascol('purchase_items','cost_unit')) $pi['cost_unit']=$unit_cost;
+      if (hascol('purchase_items','price_unit'))$pi['price_unit']=$unit_cost;
 
-        if (hascol('purchase_items','subtotal')) $pi['subtotal'] = $unit_cost * $qty;
+      if (hascol('purchase_items','subtotal')) $pi['subtotal'] = $unit_cost * $qty;
 
-        /* size ↔ talla */
-        if (hascol('purchase_items','size'))      $pi['size'] = $size;
-        elseif (hascol('purchase_items','talla')) $pi['talla'] = $size;
+      if (hascol('purchase_items','size'))      $pi['size']   = $size;
+      if (hascol('purchase_items','talla'))     $pi['talla']  = $size;
+      if (hascol('purchase_items','measure_text')) $pi['measure_text'] = $meas;
+      if (hascol('purchase_items','medidas'))      $pi['medidas']      = $meas;
 
-        /* measure_text ↔ medidas */
-        if (hascol('purchase_items','measure_text')) $pi['measure_text'] = $meas;
-        elseif (hascol('purchase_items','medidas'))  $pi['medidas'] = $meas;
-
-        /* otros campos si existen */
-        foreach (['name'=>$name,'sku'=>$sku,'color'=>$color,'image_url'=>$image_url] as $k=>$v) {
-          if (hascol('purchase_items',$k)) $pi[$k] = $v;
-        }
-        insert_filtered('purchase_items', $pi);
+      foreach (['name'=>$name,'sku'=>$sku,'color'=>$color,'image_url'=>$image_url] as $k=>$v) {
+        if (hascol('purchase_items',$k)) $pi[$k] = $v;
       }
+      insert_filtered('purchase_items', $pi);
     }
 
     $conexion->commit();
 
     $okMsg = "✅ Compra cargada. Producto y variante creados correctamente.";
-    $created = [
-      'product_id'=>$product_id,
-      'name'=>$name,
-      'image_url'=>$image_url,
-      'sale_price'=>$sale_price,
-      'qty'=>$qty,
-      'unit_cost'=>$unit_cost
-    ];
+    $created = ['product_id'=>$product_id,'name'=>$name,'image_url'=>$image_url,'sale_price'=>$sale_price,'qty'=>$qty,'unit_cost'=>$unit_cost];
   } catch (Throwable $e) {
     if (isset($conexion) && $conexion instanceof mysqli) { @$conexion->rollback(); }
     $errMsg = '❌ '.$e->getMessage();
