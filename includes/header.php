@@ -1,33 +1,40 @@
 <?php
 if (session_status()===PHP_SESSION_NONE) session_start();
 
-/* ===== Bases web ===== */
+/* ===== Bases web (robusto para localhost y Render) ===== */
 $script = $_SERVER['SCRIPT_NAME'] ?? '';
-$dir    = rtrim(dirname($script), '/\\'); // .../public  o  .../public/clientes
+$dir    = rtrim(str_replace('\\','/', dirname($script)), '/'); // /, /public, /clientes, /public/clientes, etc.
 
-// /public fijo (si estamos en /public/clientes, sube a /public)
-if (preg_match('~/public/clientes$~', $dir)) {
-  $BASE_PUBLIC = rtrim(dirname($dir), '/\\');   // .../public
+// Si la URL actual está dentro de /clientes, subimos un nivel para obtener /public (o /)
+if (preg_match('~/(clientes)(/|$)~', $dir)) {
+  $BASE_PUBLIC = rtrim(dirname($dir), '/');   // ej: /luna-shop/public  ó  /
 } else {
-  $BASE_PUBLIC = $dir;                          // .../public
+  $BASE_PUBLIC = $dir;                        // ej: /luna-shop/public  ó  /
 }
-$BASE_CLIENTES = rtrim($BASE_PUBLIC, '/').'/clientes';
+if ($BASE_PUBLIC === '') $BASE_PUBLIC = '/';  // normalizar raíz
+
+$BASE_CLIENTES  = rtrim($BASE_PUBLIC, '/').'/clientes';
 $is_client_area = (strpos($script, '/clientes/') !== false);
 
-/* ===== Helpers de URL ===== */
+/* ===== Helpers de URL (sin dobles barras y sin duplicar /clientes) ===== */
 if (!function_exists('url_public')) {
   function url_public($path){
     global $BASE_PUBLIC;
-    return rtrim($BASE_PUBLIC,'/').'/'.ltrim((string)$path,'/');
+    $b = rtrim($BASE_PUBLIC, '/');
+    $p = ltrim((string)$path, '/');
+    return ($b === '' ? '' : $b).'/'.$p;      // si $b=='' => '/'.$p
   }
 }
 if (!function_exists('url_clientes')) {
   function url_clientes($path){
     global $BASE_CLIENTES;
-    return rtrim($BASE_CLIENTES,'/').'/'.ltrim((string)$path,'/');
+    $p = ltrim((string)$path, '/');
+    // si por error viene 'clientes/...' lo limpiamos para evitar clientes/clientes
+    if (strpos($p, 'clientes/') === 0) $p = substr($p, 9);
+    return rtrim($BASE_CLIENTES, '/').'/'.$p;
   }
 }
-// Compatibilidad (por si otras vistas lo usan)
+// Compat con vistas antiguas
 if (!function_exists('url')) {
   function url($path){ return url_public($path); }
 }
