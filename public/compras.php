@@ -69,7 +69,8 @@ $cats = null;
 if ($has_categories) {
   $cats = @$conexion->query("SELECT id,name FROM categories WHERE active=1 ORDER BY name ASC");
 }
-$has_measure_input = $db_ok && hascol('product_variants','measure_text');
+/* habilitar input de medidas si existe measure_text o medidas */
+$has_measure_input = $db_ok && (hascol('product_variants','measure_text') || hascol('product_variants','medidas'));
 
 /* ===== Alta de compra + creación producto/variante ===== */
 $okMsg=$errMsg=''; $created=[];
@@ -126,8 +127,7 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
 
     $conexion->begin_transaction();
 
-    /* SKU para products: siempre lo mandamos; si está vacío generamos uno.
-       Si la columna no existe, insert_filtered lo descartará sin romperse. */
+    /* SKU para products: siempre mandamos algo */
     $sku_for_product = $sku;
     if ($sku_for_product === '') {
       $sku_for_product = 'P'.date('ymdHis').'-'.strtoupper(substr(bin2hex(random_bytes(3)),0,6));
@@ -140,22 +140,36 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
       'image_url'   => $image_url,
       'active'      => 1,
       'category_id' => $catId,
-      'sku'         => $sku_for_product,   // <-- SIEMPRE presente
+      'sku'         => $sku_for_product,   // por si products.sku es NOT NULL
     ]);
 
-    /* INSERT product_variants (stock inicial y costos) */
-    $variant_id = insert_filtered('product_variants', [
-      'product_id'   => $product_id,
-      'sku'          => $sku,
-      'size'         => $size,
-      'color'        => $color,
-      'measure_text' => $meas,
-      'price'        => $sale_price,
-      'stock'        => $qty,
-      'avg_cost'     => $unit_cost,
-    ]);
+    /* ---- INSERT product_variants con mapeo de sinónimos ---- */
+    $pv = [
+      'product_id' => $product_id,
+      'sku'        => $sku,
+      'color'      => $color,
+    ];
+    /* size ↔ talla */
+    if (hascol('product_variants','size'))        { $pv['size'] = $size; }
+    elseif (hascol('product_variants','talla'))   { $pv['talla'] = $size; }
+    /* measure_text ↔ medidas */
+    if (hascol('product_variants','measure_text')){ $pv['measure_text'] = $meas; }
+    elseif (hascol('product_variants','medidas')) { $pv['medidas'] = $meas; }
+    /* price ↔ precio */
+    if (hascol('product_variants','price'))       { $pv['price'] = $sale_price; }
+    elseif (hascol('product_variants','precio'))  { $pv['precio'] = $sale_price; }
+    /* stock ↔ existencia */
+    if (hascol('product_variants','stock'))       { $pv['stock'] = $qty; }
+    elseif (hascol('product_variants','existencia')) { $pv['existencia'] = $qty; }
+    /* avg_cost / average_cost / costo_promedio / costo_prom */
+    if (hascol('product_variants','avg_cost'))          { $pv['avg_cost'] = $unit_cost; }
+    elseif (hascol('product_variants','average_cost'))  { $pv['average_cost'] = $unit_cost; }
+    elseif (hascol('product_variants','costo_promedio')){ $pv['costo_promedio'] = $unit_cost; }
+    elseif (hascol('product_variants','costo_prom'))    { $pv['costo_prom'] = $unit_cost; }
 
-    /* Registrar compra si existen las tablas */
+    $variant_id = insert_filtered('product_variants', $pv);
+
+    /* Registrar compra si existen las tablas (también con mapeo) */
     if (t_exists('purchases') && t_exists('purchase_items')) {
       $p_date_col = hascol('purchases','purchased_at') ? 'purchased_at' : (hascol('purchases','created_at') ? 'created_at' : null);
       $pdata = [];
@@ -175,13 +189,22 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
         if (hascol('purchase_items','quantity')) $pi['quantity'] = $qty;
         elseif (hascol('purchase_items','qty'))  $pi['qty']      = $qty;
 
-        if (hascol('purchase_items','unit_cost'))     $pi['unit_cost'] = $unit_cost;
-        elseif (hascol('purchase_items','cost_unit')) $pi['cost_unit'] = $unit_cost;
-        elseif (hascol('purchase_items','price_unit'))$pi['price_unit']= $unit_cost;
+        if (hascol('purchase_items','unit_cost'))      $pi['unit_cost']  = $unit_cost;
+        elseif (hascol('purchase_items','cost_unit'))  $pi['cost_unit']  = $unit_cost;
+        elseif (hascol('purchase_items','price_unit')) $pi['price_unit'] = $unit_cost;
 
         if (hascol('purchase_items','subtotal')) $pi['subtotal'] = $unit_cost * $qty;
 
-        foreach(['name'=>$name,'sku'=>$sku,'size'=>$size,'color'=>$color,'measure_text'=>$meas,'image_url'=>$image_url] as $k=>$v){
+        /* size ↔ talla */
+        if (hascol('purchase_items','size'))      $pi['size'] = $size;
+        elseif (hascol('purchase_items','talla')) $pi['talla'] = $size;
+
+        /* measure_text ↔ medidas */
+        if (hascol('purchase_items','measure_text')) $pi['measure_text'] = $meas;
+        elseif (hascol('purchase_items','medidas'))  $pi['medidas'] = $meas;
+
+        /* otros campos si existen */
+        foreach (['name'=>$name,'sku'=>$sku,'color'=>$color,'image_url'=>$image_url] as $k=>$v) {
           if (hascol('purchase_items',$k)) $pi[$k] = $v;
         }
         insert_filtered('purchase_items', $pi);
