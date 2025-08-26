@@ -43,7 +43,6 @@ function insert_filtered($table, $data){
   $data2 = [];
   foreach($data as $k=>$v){ if(isset($cols_info[$k])) $data2[$k]=$v; }
 
-  // Rellenar NOT NULL sin default
   foreach ($cols_info as $name=>$info) {
     $isNotNull = (strtoupper($info['Null']??'YES')==='NO');
     $hasDefault= !is_null($info['Default']);
@@ -66,53 +65,43 @@ function insert_filtered($table, $data){
   $id=$stmt->insert_id; $stmt->close(); return $id;
 }
 
+/* ===== Env robusto ===== */
+function envv($k){
+  if (isset($_ENV[$k]) && $_ENV[$k] !== '') return $_ENV[$k];
+  if (isset($_SERVER[$k]) && $_SERVER[$k] !== '') return $_SERVER[$k];
+  $v = getenv($k); return $v!==false ? $v : null;
+}
+
 /* ===== Cloudinary uploader ===== */
 function cloud_is_enabled(){
-  return !!getenv('CLOUDINARY_CLOUD_NAME') && ( !!getenv('CLOUDINARY_UPLOAD_PRESET') || ( !!getenv('CLOUDINARY_API_KEY') && !!getenv('CLOUDINARY_API_SECRET') ) );
+  return !!envv('CLOUDINARY_CLOUD_NAME') && !!envv('CLOUDINARY_UPLOAD_PRESET');
 }
 
 /**
- * Sube $tmp_path a Cloudinary.
- * Devuelve la URL segura (https) o lanza Exception.
+ * Sube $tmp_path a Cloudinary (unsigned si hay UPLOAD_PRESET).
+ * Devuelve secure_url (https) o lanza Exception.
  */
 function cloud_upload_image($tmp_path, $mime, $orig_name){
-  $cloud  = getenv('CLOUDINARY_CLOUD_NAME');
-  $preset = getenv('CLOUDINARY_UPLOAD_PRESET');     // unsigned (más simple)
-  $apiKey = getenv('CLOUDINARY_API_KEY');           // signed
-  $apiSec = getenv('CLOUDINARY_API_SECRET');
-  $folder = getenv('CLOUDINARY_FOLDER') ?: 'luna-shop/products';
+  $cloud  = envv('CLOUDINARY_CLOUD_NAME');
+  $preset = envv('CLOUDINARY_UPLOAD_PRESET');   // unsigned (recomendado)
+  $folder = envv('CLOUDINARY_FOLDER') ?: 'luna-shop/products';
 
   if (!$cloud) throw new Exception('Cloudinary no configurado (CLOUDINARY_CLOUD_NAME).');
 
   $url = "https://api.cloudinary.com/v1_1/$cloud/image/upload";
-  $post = ['file' => new CURLFile($tmp_path, $mime, $orig_name)];
-
-  if ($preset) {
-    // UNSIGNED upload
-    $post['upload_preset'] = $preset;
-    $post['folder'] = $folder;
-  } else {
-    // SIGNED upload
-    if (!$apiKey || !$apiSec) throw new Exception('Faltan API KEY/SECRET para firma.');
-    $ts = time();
-    // La firma se hace con params alfabéticos (sin file ni api_key)
-    // Si incluimos folder, DEBE ir en la firma
-    $toSign = "folder=$folder&timestamp=$ts";
-    $signature = sha1($toSign.$apiSec);
-
-    $post['api_key']   = $apiKey;
-    $post['timestamp'] = $ts;
-    $post['signature'] = $signature;
-    $post['folder']    = $folder;
-  }
+  $post = [
+    'file'          => new CURLFile($tmp_path, $mime, $orig_name),
+    'upload_preset' => $preset,
+    'folder'        => $folder,
+  ];
 
   $ch = curl_init($url);
   curl_setopt_array($ch, [
-    CURLOPT_POST => true,
+    CURLOPT_POST           => true,
     CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_POSTFIELDS => $post,
+    CURLOPT_POSTFIELDS     => $post,
   ]);
-  $out = curl_exec($ch);
+  $out  = curl_exec($ch);
   if ($out === false) { $err = curl_error($ch); curl_close($ch); throw new Exception("Cloudinary cURL: $err"); }
   $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
   curl_close($ch);
@@ -125,7 +114,7 @@ function cloud_upload_image($tmp_path, $mime, $orig_name){
   return $json['secure_url'];
 }
 
-/* ===== AJAX: subir imagen y devolver URL (sin guardar compra) ===== */
+/* ===== AJAX: subir imagen y devolver URL ===== */
 if (($_GET['__ajax'] ?? '') === 'cloud_upload') {
   header('Content-Type: application/json; charset=utf-8');
   try {
@@ -169,17 +158,15 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
         if ($f['size'] > 6*1024*1024)      throw new Exception('Imagen muy pesada (máx 6MB).');
 
         if (cloud_is_enabled()) {
-          // 👉 Subir directo a Cloudinary al guardar
           $image_url = cloud_upload_image($f['tmp_name'], $f['type'], $f['name']);
         } else {
-          // Fallback local
           $baseDir   = $root.'/public/uploads';
           $subDir    = date('Y').'/'.date('m');
           $targetDir = $baseDir.'/'.$subDir;
           if (!is_dir($targetDir) && !@mkdir($targetDir, 0777, true)) throw new Exception('No se pudo crear la carpeta de uploads.');
           $nameFile  = bin2hex(random_bytes(8)).$allowed[$f['type']];
           if (!@move_uploaded_file($f['tmp_name'], $targetDir.'/'.$nameFile)) throw new Exception('No se pudo guardar la imagen.');
-          $image_url = 'uploads/'.$subDir.'/'.$nameFile; // relativa a /public
+          $image_url = 'uploads/'.$subDir.'/'.$nameFile;
         }
       } elseif ($f['error'] !== UPLOAD_ERR_NO_FILE) {
         throw new Exception('Error al subir la imagen (código '.$f['error'].').');
@@ -201,10 +188,10 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
     $supplier   = trim($_POST['supplier'] ?? '');
     $notes      = trim($_POST['notes'] ?? '');
 
-    if ($name==='') throw new Exception('El nombre del producto es obligatorio.');
-    if ($has_categories && $catId<=0) throw new Exception('Seleccioná una categoría.');
-    if ($qty<=0) throw new Exception('La cantidad debe ser mayor a cero.');
-    if ($unit_cost<0 || $sale_price<0) throw new Exception('Costos/precios no pueden ser negativos.');
+    if ($name==='')                      throw new Exception('El nombre del producto es obligatorio.');
+    if ($has_categories && $catId<=0)    throw new Exception('Seleccioná una categoría.');
+    if ($qty<=0)                         throw new Exception('La cantidad debe ser mayor a cero.');
+    if ($unit_cost<0 || $sale_price<0)   throw new Exception('Costos/precios no pueden ser negativos.');
 
     $conexion->begin_transaction();
 
@@ -230,13 +217,13 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
       'avg_cost'   => $unit_cost,
       'stock'      => $qty,
     ];
-    if (hascol('product_variants','size'))      $pv['size']   = $size;
-    if (hascol('product_variants','talla'))     $pv['talla']  = $size;
+    if (hascol('product_variants','size'))         $pv['size']         = $size;
+    if (hascol('product_variants','talla'))        $pv['talla']        = $size;
     if (hascol('product_variants','measure_text')) $pv['measure_text'] = $meas;
     if (hascol('product_variants','medidas'))      $pv['medidas']      = $meas;
     if (hascol('product_variants','precio'))       $pv['precio']       = $sale_price;
     if (hascol('product_variants','existencia'))   $pv['existencia']   = $qty;
-    if (hascol('product_variants','average_cost'))   $pv['average_cost']   = $unit_cost;
+    if (hascol('product_variants','average_cost')) $pv['average_cost'] = $unit_cost;
     if (hascol('product_variants','costo_promedio')) $pv['costo_promedio'] = $unit_cost;
     if (hascol('product_variants','costo_prom'))     $pv['costo_prom']     = $unit_cost;
 
@@ -336,11 +323,11 @@ page_head('Cargar compras y fotos', 'Subí la foto (Cloud) o URL, cargá costo/c
     <div class="row">
       <label>Imagen (subir desde el celu)
         <input class="input" type="file" id="image_file" name="image_file" accept="image/*" capture="environment">
-        <div class="hint">Podés tocar <b>Subir a la nube</b> para generar la URL y ver la previsualización.</div>
+        <div class="hint">Tocá <b>Subir a la nube</b> para generar la URL y ver la previsualización.</div>
       </label>
       <label>URL de imagen
         <input class="input" id="image_url" name="image_url" placeholder="https://… (se completa cuando subís a la nube)">
-        <div class="note"><?= cloud_is_enabled() ? 'Cloudinary activo: las fotos se guardarán en la nube.' : 'Cloudinary NO configurado: se guardarán localmente (se pierden al redeploy).' ?></div>
+        <div class="note"><?= cloud_is_enabled() ? 'Cloudinary activo: se guardan en la nube.' : 'Cloudinary NO configurado: se guardan localmente (se pierden al redeploy).' ?></div>
       </label>
     </div>
 
