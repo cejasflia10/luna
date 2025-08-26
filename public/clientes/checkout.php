@@ -31,19 +31,20 @@ if (!function_exists('urlc')) {
   function urlc($path){ return url_public('clientes/'.ltrim((string)$path,'/')); }
 }
 
-/* ===== Config pagos ===== */
+/* ===== Config pagos (SIN descuentos) ===== */
 $PAY_METHODS = [
-  'efectivo'         => ['label'=>'Efectivo',          'discount_pct'=>10],
-  'transferencia'    => ['label'=>'Transferencia',     'discount_pct'=>5],
-  'debito'           => ['label'=>'Débito',            'fee_pct'=>0, 'installments'=>[1=>0]],
-  'credito'          => ['label'=>'Crédito',           'installments'=>[1=>0, 3=>10, 6=>20, 12=>35]],
-  'cuenta_corriente' => ['label'=>'Cuenta Corriente',  'fee_pct'=>0],
+  'efectivo'         => ['label'=>'Efectivo'],
+  'transferencia'    => ['label'=>'Transferencia'],
+  'debito'           => ['label'=>'Débito',  'installments'=>[1=>0]],
+  // Recargo en crédito por cuotas (si no querés recargo, poné todos en 0)
+  'credito'          => ['label'=>'Crédito', 'installments'=>[1=>0, 3=>10, 6=>20, 12=>35]],
+  'cuenta_corriente' => ['label'=>'Cuenta Corriente'],
 ];
 
 /* ===== Config envío ===== */
 $SHIPPING = [
   'retiro' => ['label'=>'Retiro en tienda', 'flat'=>0,    'free_over'=>0],
-  'envio'  => ['label'=>'Envío a domicilio','flat'=>2500, 'free_over'=>50000], // gratis desde $50.000
+  'envio'  => ['label'=>'Envío a domicilio','flat'=>2500, 'free_over'=>50000],
 ];
 
 /* ===== Estado DB / esquema ===== */
@@ -111,8 +112,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     if (!$db_ok) $errors[]='No hay conexión a la BD.';
 
     if (empty($errors)) {
-      // Calcular totales otra vez (seguro)
-      // --- Items
+      // Recalcular items y subtotal
       $items=[]; $subtotal=0.0;
       foreach ($cart as $it) {
         $pid=(int)($it['product_id']??0); $vid=(int)($it['variant_id']??0); $qty=max(0,(int)($it['qty']??0));
@@ -141,20 +141,17 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         $lt=$price*$qty; $subtotal+=$lt;
         $items[]=['pid'=>$pid,'vid'=>$vid,'name'=>$nameP,'qty'=>$qty,'price'=>$price,'line_total'=>$lt];
       }
-      // --- Pago
+
+      // Pago (SIN DESCUENTOS)
       $method   = $payment['method'] ?? 'efectivo';
       $cuotas   = (int)($payment['installments'] ?? 1);
-      $discount=0.0; $fee=0.0;
-      if (isset($PAY_METHODS[$method])) {
-        $cfg=$PAY_METHODS[$method];
-        if (!empty($cfg['discount_pct'])) $discount=$subtotal*$cfg['discount_pct']/100;
-        if (!empty($cfg['fee_pct']))      $fee=$subtotal*$cfg['fee_pct']/100;
-        if (!empty($cfg['installments'])) {
-          $map=$cfg['installments']; if (!array_key_exists($cuotas,$map)) $cuotas=(int)array_key_first($map);
-          $discount=0.0; $fee=$subtotal*$map[$cuotas]/100;
-        }
+      $discount = 0.0; // <- sin descuentos
+      $fee      = 0.0;
+      if ($method==='credito' && !empty($PAY_METHODS['credito']['installments'][$cuotas])) {
+        $fee = $subtotal * ($PAY_METHODS['credito']['installments'][$cuotas]/100);
       }
-      // --- Envío
+
+      // Envío
       $ship_method = $shipping['method'] ?? 'retiro';
       $ship_cfg = $SHIPPING[$ship_method] ?? $SHIPPING['retiro'];
       $ship_cost = 0.0;
@@ -168,59 +165,65 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         if (($shipping['province']??'')==='')$errors[]='Ingresá la provincia.';
         if (($shipping['postal']??'')==='')  $errors[]='Ingresá el código postal.';
       }
-      $total = max(0.0, $subtotal - $discount + $fee + $ship_cost);
+      $total = max(0.0, $subtotal + $fee + $ship_cost); // sin descuento
 
       if (empty($errors)) {
-        // Crear tablas si no existen (con columnas de envío)
-        @$conexion->query("CREATE TABLE IF NOT EXISTS sales (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          customer_name VARCHAR(120) NULL,
-          customer_phone VARCHAR(60) NULL,
-          customer_email VARCHAR(120) NULL,
-          payment_method VARCHAR(30) NOT NULL,
-          installments INT NOT NULL DEFAULT 1,
-          subtotal DECIMAL(12,2) NOT NULL DEFAULT 0,
-          discount DECIMAL(12,2) NOT NULL DEFAULT 0,
-          fee DECIMAL(12,2) NOT NULL DEFAULT 0,
-          shipping_method VARCHAR(30) NULL,
-          shipping_cost DECIMAL(12,2) NOT NULL DEFAULT 0,
-          shipping_address TEXT NULL,
-          shipping_city VARCHAR(120) NULL,
-          shipping_province VARCHAR(120) NULL,
-          shipping_postal VARCHAR(20) NULL,
-          shipping_notes TEXT NULL,
-          total DECIMAL(12,2) NOT NULL DEFAULT 0,
-          status VARCHAR(20) NOT NULL DEFAULT 'new',
-          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-
-        @$conexion->query("CREATE TABLE IF NOT EXISTS sale_items (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          sale_id INT NOT NULL,
-          product_id INT NOT NULL,
-          variant_id INT NOT NULL DEFAULT 0,
-          name VARCHAR(255) NOT NULL,
-          qty INT NOT NULL,
-          price_unit DECIMAL(12,2) NOT NULL DEFAULT 0,
-          line_total DECIMAL(12,2) NOT NULL DEFAULT 0,
-          FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-
-        $conexion->begin_transaction();
         try {
+          // Crear tablas si no existen
+          @$conexion->query("CREATE TABLE IF NOT EXISTS sales (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            customer_name VARCHAR(120) NULL,
+            customer_phone VARCHAR(60) NULL,
+            customer_email VARCHAR(120) NULL,
+            payment_method VARCHAR(30) NOT NULL,
+            installments INT NOT NULL DEFAULT 1,
+            subtotal DECIMAL(12,2) NOT NULL DEFAULT 0,
+            discount DECIMAL(12,2) NOT NULL DEFAULT 0,
+            fee DECIMAL(12,2) NOT NULL DEFAULT 0,
+            shipping_method VARCHAR(30) NULL,
+            shipping_cost DECIMAL(12,2) NOT NULL DEFAULT 0,
+            shipping_address TEXT NULL,
+            shipping_city VARCHAR(120) NULL,
+            shipping_province VARCHAR(120) NULL,
+            shipping_postal VARCHAR(20) NULL,
+            shipping_notes TEXT NULL,
+            total DECIMAL(12,2) NOT NULL DEFAULT 0,
+            status VARCHAR(20) NOT NULL DEFAULT 'new',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+          @$conexion->query("CREATE TABLE IF NOT EXISTS sale_items (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            sale_id INT NOT NULL,
+            product_id INT NOT NULL,
+            variant_id INT NOT NULL DEFAULT 0,
+            name VARCHAR(255) NOT NULL,
+            qty INT NOT NULL,
+            price_unit DECIMAL(12,2) NOT NULL DEFAULT 0,
+            line_total DECIMAL(12,2) NOT NULL DEFAULT 0,
+            FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+          $conexion->begin_transaction();
+
           // Intento extendido (con columnas de envío)
-          $stmt = $conexion->prepare("INSERT INTO sales
+          $sql = "INSERT INTO sales
             (customer_name, customer_phone, customer_email, payment_method, installments, subtotal, discount, fee,
              shipping_method, shipping_cost, shipping_address, shipping_city, shipping_province, shipping_postal, shipping_notes,
              total, status)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'new')");
-          $types = "ssssidddsssssssd";
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'new')";
+          $stmt = $conexion->prepare($sql);
+          if (!$stmt) { throw new Exception("SQL PREPARE sales: ".$conexion->error." — ".$sql); }
+
+          // Tipos: s s s s i d d d s d s s s s s d
+          $types = "ssssidddsdsssssd";
           $addr  = (string)($shipping['address']??'');
           $city  = (string)($shipping['city']??'');
           $prov  = (string)($shipping['province']??'');
           $post  = (string)($shipping['postal']??'');
           $notes = (string)($shipping['notes']??'');
           $shipm = (string)$ship_method;
+
           $stmt->bind_param($types,
             $name,$phone,$email,$method,$cuotas,$subtotal,$discount,$fee,
             $shipm,$ship_cost,$addr,$city,$prov,$post,$notes,
@@ -229,34 +232,71 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
           $stmt->execute();
           $sale_id = (int)$stmt->insert_id;
           $stmt->close();
+
+          // Ítems
+          $sqlItems = "INSERT INTO sale_items
+            (sale_id, product_id, variant_id, name, qty, price_unit, line_total)
+            VALUES (?,?,?,?,?,?,?)";
+          $sti = $conexion->prepare($sqlItems);
+          if (!$sti) { throw new Exception("SQL PREPARE sale_items: ".$conexion->error." — ".$sqlItems); }
+
+          foreach ($items as $it) {
+            $sti->bind_param("iiisidd",
+              $sale_id, (int)$it['pid'], (int)$it['vid'], $it['name'],
+              (int)$it['qty'], (float)$it['price'], (float)$it['line_total']
+            );
+            $sti->execute();
+          }
+          $sti->close();
+
+          $conexion->commit();
+          $ok_sale_id = $sale_id;
+
+          // Vaciar carrito
+          $_SESSION['cart'] = [];
+          $_SESSION['cart_count'] = 0;
+
         } catch (Throwable $e) {
-          // Fallback para schema antiguo (sin columnas de envío)
-          $conexion->rollback(); $conexion->begin_transaction();
-          $stmt = $conexion->prepare("INSERT INTO sales
-            (customer_name, customer_phone, customer_email, payment_method, installments, subtotal, discount, fee, total, status)
-            VALUES (?,?,?,?,?,?,?,?,?, 'new')");
-          $stmt->bind_param("ssssidddd", $name,$phone,$email,$method,$cuotas,$subtotal,$discount,$fee,$total);
-          $stmt->execute();
-          $sale_id = (int)$stmt->insert_id;
-          $stmt->close();
+          // Fallback para schema antiguo (sin columnas de envío) o errores
+          if ($conexion && $conexion->errno===0) { /* noop */ }
+          @$conexion->rollback();
+          try {
+            $conexion->begin_transaction();
+            $sql = "INSERT INTO sales
+              (customer_name, customer_phone, customer_email, payment_method, installments, subtotal, discount, fee, total, status)
+              VALUES (?,?,?,?,?,?,?,?,?, 'new')";
+            $stmt = $conexion->prepare($sql);
+            if (!$stmt) { throw new Exception("SQL PREPARE sales (fallback): ".$conexion->error." — ".$sql); }
+            $stmt->bind_param("ssssidddd",
+              $name,$phone,$email,$method,$cuotas,$subtotal,$discount,$fee,$total
+            );
+            $stmt->execute();
+            $sale_id = (int)$stmt->insert_id;
+            $stmt->close();
+
+            $sqlItems = "INSERT INTO sale_items
+              (sale_id, product_id, variant_id, name, qty, price_unit, line_total)
+              VALUES (?,?,?,?,?,?,?)";
+            $sti = $conexion->prepare($sqlItems);
+            if (!$sti) { throw new Exception("SQL PREPARE sale_items (fallback): ".$conexion->error." — ".$sqlItems); }
+            foreach ($items as $it) {
+              $sti->bind_param("iiisidd",
+                $sale_id, (int)$it['pid'], (int)$it['vid'], $it['name'],
+                (int)$it['qty'], (float)$it['price'], (float)$it['line_total']
+              );
+              $sti->execute();
+            }
+            $sti->close();
+            $conexion->commit();
+            $ok_sale_id = $sale_id;
+
+            $_SESSION['cart'] = [];
+            $_SESSION['cart_count'] = 0;
+          } catch (Throwable $e2) {
+            @$conexion->rollback();
+            $errors[] = 'Error al guardar la venta: '.$e2->getMessage();
+          }
         }
-
-        // Ítems
-        $sti = $conexion->prepare("INSERT INTO sale_items
-          (sale_id, product_id, variant_id, name, qty, price_unit, line_total)
-          VALUES (?,?,?,?,?,?,?)");
-        foreach ($items as $it) {
-          $sti->bind_param("iiisidd", $sale_id, (int)$it['pid'], (int)$it['vid'], $it['name'], (int)$it['qty'], (float)$it['price'], (float)$it['line_total']);
-          $sti->execute();
-        }
-        $sti->close();
-
-        $conexion->commit();
-        $ok_sale_id = $sale_id;
-
-        // Vaciar carrito
-        $_SESSION['cart'] = [];
-        $_SESSION['cart_count'] = 0;
       }
     }
   }
@@ -292,19 +332,14 @@ foreach ($cart as $k => $it) {
   $items[]=['pid'=>$pid,'vid'=>$vid,'name'=>$nameP,'img'=>$img,'qty'=>$qty,'price'=>$price,'line_total'=>$lt];
 }
 
-/* ===== Totales (pago + envío) ===== */
+/* ===== Totales (SIN descuentos) ===== */
 $method   = $payment['method'] ?? 'efectivo';
 $cuotas   = (int)($payment['installments'] ?? 1);
-$discount=0.0; $fee=0.0;
+$discount = 0.0; // <- no se aplican descuentos en la tienda
+$fee      = 0.0;
 
-if (isset($PAY_METHODS[$method])) {
-  $cfg=$PAY_METHODS[$method];
-  if (!empty($cfg['discount_pct'])) $discount=$subtotal*$cfg['discount_pct']/100;
-  if (!empty($cfg['fee_pct']))      $fee=$subtotal*$cfg['fee_pct']/100;
-  if (!empty($cfg['installments'])) {
-    $map=$cfg['installments']; if (!array_key_exists($cuotas,$map)) $cuotas=(int)array_key_first($map);
-    $discount=0.0; $fee=$subtotal*$map[$cuotas]/100;
-  }
+if ($method==='credito' && !empty($PAY_METHODS['credito']['installments'][$cuotas])) {
+  $fee = $subtotal * ($PAY_METHODS['credito']['installments'][$cuotas]/100);
 }
 
 $ship_method = $shipping['method'] ?? 'retiro';
@@ -315,7 +350,7 @@ if ($ship_method==='envio') {
   $free=(float)($ship_cfg['free_over']??0);
   $ship_cost = ($free>0 && $subtotal>=$free) ? 0.0 : $flat;
 }
-$total = max(0.0, $subtotal - $discount + $fee + $ship_cost);
+$total = max(0.0, $subtotal + $fee + $ship_cost); // sin descuento
 $cuota_monto = ($method==='credito' && $cuotas>1) ? ($total/$cuotas) : 0.0;
 
 $header_path = $root.'/includes/header.php';
@@ -393,9 +428,6 @@ $cart_empty = empty($items);
 
           <div style="margin-top:10px">
             <div style="display:flex;justify-content:space-between"><span>Subtotal</span><b>$ <?= money($subtotal) ?></b></div>
-            <?php if ($discount>0): ?>
-              <div style="display:flex;justify-content:space-between"><span>Descuento</span><b>− $ <?= money($discount) ?></b></div>
-            <?php endif; ?>
             <?php if ($fee>0): ?>
               <div style="display:flex;justify-content:space-between"><span>Recargo</span><b>+ $ <?= money($fee) ?></b></div>
             <?php endif; ?>
