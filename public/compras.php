@@ -6,11 +6,11 @@ require $root.'/includes/conn.php';
 require $root.'/includes/helpers.php';
 require $root.'/includes/page_head.php'; // HERO unificado
 
-/* ===== Helpers básicos ===== */
+/* ===== Helpers ===== */
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
 
-/* ===== Rutas dinámicas (localhost/Render) ===== */
+/* ===== Rutas ===== */
 $BASE = rtrim(dirname($_SERVER['SCRIPT_NAME'] ?? ''), '/\\');
 if (!function_exists('url')) {
   function url($p){ global $BASE; return rtrim($BASE,'/').'/'.ltrim((string)$p,'/'); }
@@ -19,7 +19,7 @@ if (!function_exists('url')) {
 /* ===== Conexión/flags ===== */
 $db_ok = isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno;
 
-/* ======= Utilidades tolerantes al esquema ======= */
+/* ===== Utilidades tolerantes al esquema ===== */
 function t_exists($table){
   global $conexion;
   $rs = @$conexion->query("SHOW TABLES LIKE '$table'");
@@ -69,8 +69,9 @@ $cats = null;
 if ($has_categories) {
   $cats = @$conexion->query("SELECT id,name FROM categories WHERE active=1 ORDER BY name ASC");
 }
+$has_measure_input = $db_ok && hascol('product_variants','measure_text');
 
-/* ===== Alta de compra con creación de producto/variante ===== */
+/* ===== Alta de compra + creación producto/variante ===== */
 $okMsg=$errMsg=''; $created=[];
 if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')==='create_purchase') {
   try {
@@ -78,7 +79,7 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
       throw new Exception('Faltan tablas mínimas: products y/o product_variants.');
     }
 
-    /* ---- Imagen: archivo o URL ---- */
+    /* Imagen (archivo o URL) */
     $image_url = trim($_POST['image_url'] ?? '');
     if (!empty($_FILES['image_file']['name'])) {
       $f = $_FILES['image_file'];
@@ -97,14 +98,13 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
         if (!@move_uploaded_file($f['tmp_name'], $targetDir.'/'.$nameFile))
           throw new Exception('No se pudo guardar la imagen.');
 
-        // Guardamos ruta relativa (se resuelve con url())
-        $image_url = 'uploads/'.$subDir.'/'.$nameFile;
+        $image_url = 'uploads/'.$subDir.'/'.$nameFile; // relativa a /public
       } elseif ($f['error'] !== UPLOAD_ERR_NO_FILE) {
         throw new Exception('Error al subir la imagen (código '.$f['error'].').');
       }
     }
 
-    /* ---- Datos del formulario ---- */
+    /* Datos del formulario */
     $name   = trim($_POST['name'] ?? '');
     $desc   = trim($_POST['description'] ?? '');
     $sku    = trim($_POST['sku'] ?? '');
@@ -126,17 +126,24 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
 
     $conexion->begin_transaction();
 
-    /* ---- INSERT products (sólo columnas existentes) ---- */
+    /* SKU para products: siempre lo mandamos; si está vacío generamos uno.
+       Si la columna no existe, insert_filtered lo descartará sin romperse. */
+    $sku_for_product = $sku;
+    if ($sku_for_product === '') {
+      $sku_for_product = 'P'.date('ymdHis').'-'.strtoupper(substr(bin2hex(random_bytes(3)),0,6));
+    }
+
+    /* INSERT products (sólo columnas existentes) */
     $product_id = insert_filtered('products', [
       'name'        => $name,
       'description' => $desc,
       'image_url'   => $image_url,
       'active'      => 1,
       'category_id' => $catId,
+      'sku'         => $sku_for_product,   // <-- SIEMPRE presente
     ]);
 
-    /* ---- INSERT product_variants (sólo columnas existentes) ----
-       Cargamos stock = cantidad, avg_cost = costo unitario y price = venta */
+    /* INSERT product_variants (stock inicial y costos) */
     $variant_id = insert_filtered('product_variants', [
       'product_id'   => $product_id,
       'sku'          => $sku,
@@ -148,9 +155,8 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
       'avg_cost'     => $unit_cost,
     ]);
 
-    /* ---- INSERT en purchases / purchase_items si existen ---- */
+    /* Registrar compra si existen las tablas */
     if (t_exists('purchases') && t_exists('purchase_items')) {
-      // fecha: purchased_at o created_at
       $p_date_col = hascol('purchases','purchased_at') ? 'purchased_at' : (hascol('purchases','created_at') ? 'created_at' : null);
       $pdata = [];
       if ($p_date_col) $pdata[$p_date_col] = date('Y-m-d H:i:s');
@@ -158,26 +164,28 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
       if (hascol('purchases','notes'))    $pdata['notes']    = $notes;
       if (hascol('purchases','status'))   $pdata['status']   = 'done';
       if (hascol('purchases','total'))    $pdata['total']    = $unit_cost * $qty;
-      $purchase_id = insert_filtered('purchases', $pdata);
 
-      // purchase_items (maneja nombres alternativos)
-      $pi = ['purchase_id'=>$purchase_id];
-      if (hascol('purchase_items','variant_id')) $pi['variant_id'] = $variant_id;
-      if (hascol('purchase_items','product_id')) $pi['product_id'] = $product_id;
+      if ($pdata) {
+        $purchase_id = insert_filtered('purchases', $pdata);
 
-      if (hascol('purchase_items','quantity')) $pi['quantity'] = $qty;
-      elseif (hascol('purchase_items','qty'))  $pi['qty']      = $qty;
+        $pi = ['purchase_id'=>$purchase_id];
+        if (hascol('purchase_items','variant_id')) $pi['variant_id'] = $variant_id;
+        if (hascol('purchase_items','product_id')) $pi['product_id'] = $product_id;
 
-      if (hascol('purchase_items','unit_cost'))     $pi['unit_cost'] = $unit_cost;
-      elseif (hascol('purchase_items','cost_unit')) $pi['cost_unit'] = $unit_cost;
-      elseif (hascol('purchase_items','price_unit'))$pi['price_unit']= $unit_cost;
+        if (hascol('purchase_items','quantity')) $pi['quantity'] = $qty;
+        elseif (hascol('purchase_items','qty'))  $pi['qty']      = $qty;
 
-      if (hascol('purchase_items','subtotal')) $pi['subtotal'] = $unit_cost * $qty;
+        if (hascol('purchase_items','unit_cost'))     $pi['unit_cost'] = $unit_cost;
+        elseif (hascol('purchase_items','cost_unit')) $pi['cost_unit'] = $unit_cost;
+        elseif (hascol('purchase_items','price_unit'))$pi['price_unit']= $unit_cost;
 
-      foreach(['name'=>$name,'sku'=>$sku,'size'=>$size,'color'=>$color,'measure_text'=>$meas,'image_url'=>$image_url] as $k=>$v){
-        if (hascol('purchase_items',$k)) $pi[$k] = $v;
+        if (hascol('purchase_items','subtotal')) $pi['subtotal'] = $unit_cost * $qty;
+
+        foreach(['name'=>$name,'sku'=>$sku,'size'=>$size,'color'=>$color,'measure_text'=>$meas,'image_url'=>$image_url] as $k=>$v){
+          if (hascol('purchase_items',$k)) $pi[$k] = $v;
+        }
+        insert_filtered('purchase_items', $pi);
       }
-      insert_filtered('purchase_items', $pi);
     }
 
     $conexion->commit();
@@ -250,7 +258,7 @@ page_head('Cargar compras y fotos', 'Creá el producto con categoría, subí la 
       <label>SKU <input class="input" name="sku" placeholder="Opcional"></label>
       <label>Talle <input class="input" name="size" placeholder="S / M / L…"></label>
       <label>Color <input class="input" name="color" placeholder="Negro / Azul…"></label>
-      <label>Medidas <input class="input" name="measure_text" placeholder="Ancho x Largo…"></label>
+      <label>Medidas <input class="input" name="measure_text" placeholder="Ancho x Largo…" <?= $has_measure_input?'':'disabled' ?>></label>
     </div>
 
     <h3>Compra</h3>
@@ -274,7 +282,9 @@ page_head('Cargar compras y fotos', 'Creá el producto con categoría, subí la 
     <div class="grid">
       <div class="card">
         <?php
-          $img = $created['image_url'] ? url($created['image_url']) : ('https://picsum.photos/640/480?random='.(int)$created['product_id']);
+          $img = $created['image_url'];
+          if ($img && !preg_match('~^https?://~i',$img)) { $img = url($img); }
+          if (!$img) { $img = 'https://picsum.photos/640/480?random='.(int)$created['product_id']; }
         ?>
         <img src="<?= h($img) ?>" alt="<?= h($created['name']) ?>" loading="lazy" width="640" height="480">
         <div class="p">
