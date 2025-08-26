@@ -6,173 +6,194 @@ require $root.'/includes/conn.php';
 require $root.'/includes/helpers.php';
 require $root.'/includes/page_head.php'; // HERO unificado
 
-/* Helpers por si faltan */
+/* ===== Helpers básicos ===== */
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
 
-/* Rutas dinámicas (localhost/Render) */
-$BASE = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/\\');
+/* ===== Rutas dinámicas (localhost/Render) ===== */
+$BASE = rtrim(dirname($_SERVER['SCRIPT_NAME'] ?? ''), '/\\');
 if (!function_exists('url')) {
-  function url($p){ global $BASE; return $BASE.'/'.ltrim($p,'/'); }
+  function url($p){ global $BASE; return rtrim($BASE,'/').'/'.ltrim((string)$p,'/'); }
 }
 
-/* ====== Flags de esquema para evitar errores ====== */
+/* ===== Conexión/flags ===== */
 $db_ok = isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno;
-$has_categories=$has_products=$has_variants=$has_purchases=$has_purchase_items=false;
-$has_created_at=false; $has_measure=false;
 
-if ($db_ok) {
-  $has_categories    = !!(@$conexion->query("SHOW TABLES LIKE 'categories'")->num_rows ?? 0);
-  $has_products      = !!(@$conexion->query("SHOW TABLES LIKE 'products'")->num_rows ?? 0);
-  $has_variants      = !!(@$conexion->query("SHOW TABLES LIKE 'product_variants'")->num_rows ?? 0);
-  $has_purchases     = !!(@$conexion->query("SHOW TABLES LIKE 'purchases'")->num_rows ?? 0);
-  $has_purchase_items= !!(@$conexion->query("SHOW TABLES LIKE 'purchase_items'")->num_rows ?? 0);
+/* ======= Utilidades tolerantes al esquema ======= */
+function t_exists($table){
+  global $conexion;
+  $rs = @$conexion->query("SHOW TABLES LIKE '$table'");
+  return ($rs && $rs->num_rows>0);
+}
+function table_cols($table){
+  global $conexion; $out=[];
+  if ($rs=@$conexion->query("SHOW COLUMNS FROM `$table`")) {
+    while($r=$rs->fetch_assoc()) $out[$r['Field']]=true;
+  }
+  return $out;
+}
+function hascol($table,$col){
+  global $conexion;
+  $rs = @$conexion->query("SHOW COLUMNS FROM `$table` LIKE '$col'");
+  return ($rs && $rs->num_rows>0);
+}
+function infer_type($v){
+  if (is_int($v)) return 'i';
+  if (is_float($v)) return 'd';
+  if (is_numeric($v)) return (str_contains((string)$v,'.')?'d':'i');
+  return 's';
+}
+function insert_filtered($table, $data){
+  global $conexion;
+  $cols_exist = table_cols($table);
+  $data2 = [];
+  foreach($data as $k=>$v){ if(isset($cols_exist[$k])) $data2[$k]=$v; }
+  if (!$data2) throw new Exception("No hay columnas compatibles para `$table`.");
 
-  if ($has_products) {
-    $has_created_at = !!(@$conexion->query("SHOW COLUMNS FROM products LIKE 'created_at'")->num_rows ?? 0);
-  }
-  if ($has_variants) {
-    $has_measure    = !!(@$conexion->query("SHOW COLUMNS FROM product_variants LIKE 'measure_text'")->num_rows ?? 0);
-  }
+  $cols = array_keys($data2);
+  $ph   = array_fill(0, count($cols), '?');
+  $types=''; $params=[];
+  foreach($cols as $c){ $types .= infer_type($data2[$c]); $params[]=$data2[$c]; }
+
+  $sql = "INSERT INTO `$table` (`".implode("`,`",$cols)."`) VALUES (".implode(',',$ph).")";
+  $stmt = $conexion->prepare($sql);
+  if (!$stmt) throw new Exception("SQL PREPARE ($table): ".$conexion->error." — ".$sql);
+  $stmt->bind_param($types, ...$params);
+  if (!$stmt->execute()){ $e=$stmt->error; $stmt->close(); throw new Exception("SQL EXEC ($table): $e — ".$sql); }
+  $id=$stmt->insert_id; $stmt->close(); return $id;
 }
 
-/* ====== Datos para selects ====== */
+/* ===== Datos para selects ===== */
+$has_categories = $db_ok && t_exists('categories');
 $cats = null;
-if ($db_ok && $has_categories) {
+if ($has_categories) {
   $cats = @$conexion->query("SELECT id,name FROM categories WHERE active=1 ORDER BY name ASC");
 }
 
-/* (Opcional) productos recientes para mostrar en algún lado */
-$prods = null;
-if ($db_ok && $has_products) {
-  $order = $has_created_at ? "created_at DESC" : "id DESC";
-  $prods = @$conexion->query("SELECT id, name FROM products WHERE active=1 ORDER BY $order LIMIT 100");
-}
-
-/* ====== Alta de compra con creación de producto/variante ====== */
+/* ===== Alta de compra con creación de producto/variante ===== */
 $okMsg=$errMsg=''; $created=[];
 if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')==='create_purchase') {
-  if (!$has_products || !$has_variants || !$has_purchases || !$has_purchase_items) {
-    $errMsg = '❌ Faltan tablas (products, product_variants, purchases o purchase_items). Ejecutá el schema.sql.';
-  } else {
-    $conexion->begin_transaction();
-    try {
-      /* ---- Imagen: archivo o URL ---- */
-      $image_url = trim($_POST['image_url'] ?? '');
-      if (!empty($_FILES['image_file']['name'])) {
-        $f = $_FILES['image_file'];
-        if ($f['error']===UPLOAD_ERR_OK) {
-          $allowed = ['image/jpeg'=>'.jpg','image/png'=>'.png','image/webp'=>'.webp'];
-          if (!isset($allowed[$f['type']])) { throw new Exception('Formato no permitido (JPG/PNG/WEBP).'); }
-          if ($f['size'] > 4*1024*1024) { throw new Exception('Imagen muy pesada (máx 4MB).'); }
-
-          $baseDir   = $root.'/public/uploads';
-          $subDir    = date('Y').'/'.date('m');
-          $targetDir = $baseDir.'/'.$subDir;
-          if (!is_dir($targetDir) && !@mkdir($targetDir, 0777, true)) {
-            throw new Exception('No se pudo crear la carpeta de uploads.');
-          }
-          $nameFile = bin2hex(random_bytes(8)).$allowed[$f['type']];
-          if (!@move_uploaded_file($f['tmp_name'], $targetDir.'/'.$nameFile)) {
-            throw new Exception('No se pudo guardar la imagen.');
-          }
-          // Guardamos ruta relativa desde /public
-          $image_url = 'uploads/'.$subDir.'/'.$nameFile;
-        } elseif ($f['error'] !== UPLOAD_ERR_NO_FILE) {
-          throw new Exception('Error al subir la imagen (código '.$f['error'].').');
-        }
-      }
-
-      /* ---- Datos del formulario ---- */
-      $name   = trim($_POST['name'] ?? '');
-      $desc   = trim($_POST['description'] ?? '');
-      $sku    = trim($_POST['sku'] ?? '');
-      $size   = trim($_POST['size'] ?? '');
-      $color  = trim($_POST['color'] ?? '');
-      $meas   = trim($_POST['measure_text'] ?? '');
-      $sale_price = (float)($_POST['sale_price'] ?? 0);
-      $catId  = (int)($_POST['category_id'] ?? 0);
-
-      $qty        = (int)($_POST['quantity'] ?? 0);
-      $unit_cost  = (float)($_POST['unit_cost'] ?? 0);
-      $supplier   = trim($_POST['supplier'] ?? '');
-      $notes      = trim($_POST['notes'] ?? '');
-
-      if ($name==='')    throw new Exception('El nombre del producto es obligatorio.');
-      if ($has_categories && $catId<=0) throw new Exception('Seleccioná una categoría.');
-      if ($qty<=0)       throw new Exception('La cantidad debe ser mayor a cero.');
-      if ($unit_cost<0)  throw new Exception('El costo unitario no puede ser negativo.');
-      if ($sale_price<0) throw new Exception('El precio de venta no puede ser negativo.');
-
-      /* ---- Crear producto ---- */
-      $stmt = $conexion->prepare("INSERT INTO products(name,description,image_url,active,category_id) VALUES (?,?,?,?,?)");
-      $one=1;
-      $stmt->bind_param('sssii', $name, $desc, $image_url, $one, $catId);
-      $stmt->execute();
-      $product_id = (int)$stmt->insert_id; $stmt->close();
-
-      /* ---- Crear variante (precio de venta) ---- */
-      if ($has_measure) {
-        $stmt = $conexion->prepare("
-          INSERT INTO product_variants(product_id,sku,size,color,measure_text,price,stock,avg_cost)
-          VALUES (?,?,?,?,?,?,0,0)
-        ");
-        $stmt->bind_param('isssss', $product_id, $sku, $size, $color, $meas, $sale_price);
-      } else {
-        $stmt = $conexion->prepare("
-          INSERT INTO product_variants(product_id,sku,size,color,price,stock,avg_cost)
-          VALUES (?,?,?,?,?,0,0)
-        ");
-        $stmt->bind_param('isssd', $product_id, $sku, $size, $color, $sale_price);
-      }
-      $stmt->execute();
-      $variant_id = (int)$stmt->insert_id; $stmt->close();
-
-      /* ---- Crear compra + ítem ---- */
-      $stmt = $conexion->prepare("INSERT INTO purchases(purchased_at,supplier,notes,total) VALUES (NOW(),?,?,0)");
-      $stmt->bind_param('ss', $supplier, $notes);
-      $stmt->execute();
-      $purchase_id = (int)$stmt->insert_id; $stmt->close();
-
-      $subtotal = $unit_cost * $qty;
-      $stmt = $conexion->prepare("
-        INSERT INTO purchase_items(purchase_id,variant_id,quantity,unit_cost,subtotal)
-        VALUES (?,?,?,?,?)
-      ");
-      $stmt->bind_param('iiidd', $purchase_id, $variant_id, $qty, $unit_cost, $subtotal);
-      $stmt->execute(); $stmt->close();
-
-      $stmt = $conexion->prepare("UPDATE purchases SET total=? WHERE id=?");
-      $stmt->bind_param('di', $subtotal, $purchase_id);
-      $stmt->execute(); $stmt->close();
-
-      /* ---- Stock + costo promedio ---- */
-      $res = $conexion->query("SELECT stock, avg_cost FROM product_variants WHERE id=".$variant_id." FOR UPDATE");
-      $row = $res->fetch_assoc();
-      $old_stock = (int)$row['stock'];
-      $old_avg   = (float)$row['avg_cost'];
-      $new_stock = $old_stock + $qty;
-      $new_avg   = $new_stock > 0 ? (($old_avg*$old_stock) + ($unit_cost*$qty)) / $new_stock : $unit_cost;
-
-      $stmt = $conexion->prepare("UPDATE product_variants SET stock=?, avg_cost=?, price=? WHERE id=?");
-      $stmt->bind_param('iddi', $new_stock, $new_avg, $sale_price, $variant_id);
-      $stmt->execute(); $stmt->close();
-
-      $conexion->commit();
-
-      $okMsg = "✅ Compra cargada. Stock actualizado y precio de venta establecido.";
-      $created = [
-        'product_id'=>$product_id,
-        'name'=>$name,
-        'image_url'=>$image_url,
-        'sale_price'=>$sale_price,
-        'qty'=>$qty,
-        'unit_cost'=>$unit_cost
-      ];
-    } catch (Throwable $e) {
-      $conexion->rollback();
-      $errMsg = '❌ '.$e->getMessage();
+  try {
+    if (!t_exists('products') || !t_exists('product_variants')) {
+      throw new Exception('Faltan tablas mínimas: products y/o product_variants.');
     }
+
+    /* ---- Imagen: archivo o URL ---- */
+    $image_url = trim($_POST['image_url'] ?? '');
+    if (!empty($_FILES['image_file']['name'])) {
+      $f = $_FILES['image_file'];
+      if ($f['error']===UPLOAD_ERR_OK) {
+        $allowed = ['image/jpeg'=>'.jpg','image/png'=>'.png','image/webp'=>'.webp'];
+        if (!isset($allowed[$f['type']]))  throw new Exception('Formato no permitido (JPG/PNG/WEBP).');
+        if ($f['size'] > 4*1024*1024)      throw new Exception('Imagen muy pesada (máx 4MB).');
+
+        $baseDir   = $root.'/public/uploads';
+        $subDir    = date('Y').'/'.date('m');
+        $targetDir = $baseDir.'/'.$subDir;
+        if (!is_dir($targetDir) && !@mkdir($targetDir, 0777, true))
+          throw new Exception('No se pudo crear la carpeta de uploads.');
+
+        $nameFile  = bin2hex(random_bytes(8)).$allowed[$f['type']];
+        if (!@move_uploaded_file($f['tmp_name'], $targetDir.'/'.$nameFile))
+          throw new Exception('No se pudo guardar la imagen.');
+
+        // Guardamos ruta relativa (se resuelve con url())
+        $image_url = 'uploads/'.$subDir.'/'.$nameFile;
+      } elseif ($f['error'] !== UPLOAD_ERR_NO_FILE) {
+        throw new Exception('Error al subir la imagen (código '.$f['error'].').');
+      }
+    }
+
+    /* ---- Datos del formulario ---- */
+    $name   = trim($_POST['name'] ?? '');
+    $desc   = trim($_POST['description'] ?? '');
+    $sku    = trim($_POST['sku'] ?? '');
+    $size   = trim($_POST['size'] ?? '');
+    $color  = trim($_POST['color'] ?? '');
+    $meas   = trim($_POST['measure_text'] ?? '');
+    $sale_price = (float)($_POST['sale_price'] ?? 0);
+    $catId  = (int)($_POST['category_id'] ?? 0);
+
+    $qty        = (int)($_POST['quantity'] ?? 0);
+    $unit_cost  = (float)($_POST['unit_cost'] ?? 0);
+    $supplier   = trim($_POST['supplier'] ?? '');
+    $notes      = trim($_POST['notes'] ?? '');
+
+    if ($name==='') throw new Exception('El nombre del producto es obligatorio.');
+    if ($has_categories && $catId<=0) throw new Exception('Seleccioná una categoría.');
+    if ($qty<=0) throw new Exception('La cantidad debe ser mayor a cero.');
+    if ($unit_cost<0 || $sale_price<0) throw new Exception('Costos/precios no pueden ser negativos.');
+
+    $conexion->begin_transaction();
+
+    /* ---- INSERT products (sólo columnas existentes) ---- */
+    $product_id = insert_filtered('products', [
+      'name'        => $name,
+      'description' => $desc,
+      'image_url'   => $image_url,
+      'active'      => 1,
+      'category_id' => $catId,
+    ]);
+
+    /* ---- INSERT product_variants (sólo columnas existentes) ----
+       Cargamos stock = cantidad, avg_cost = costo unitario y price = venta */
+    $variant_id = insert_filtered('product_variants', [
+      'product_id'   => $product_id,
+      'sku'          => $sku,
+      'size'         => $size,
+      'color'        => $color,
+      'measure_text' => $meas,
+      'price'        => $sale_price,
+      'stock'        => $qty,
+      'avg_cost'     => $unit_cost,
+    ]);
+
+    /* ---- INSERT en purchases / purchase_items si existen ---- */
+    if (t_exists('purchases') && t_exists('purchase_items')) {
+      // fecha: purchased_at o created_at
+      $p_date_col = hascol('purchases','purchased_at') ? 'purchased_at' : (hascol('purchases','created_at') ? 'created_at' : null);
+      $pdata = [];
+      if ($p_date_col) $pdata[$p_date_col] = date('Y-m-d H:i:s');
+      if (hascol('purchases','supplier')) $pdata['supplier'] = $supplier;
+      if (hascol('purchases','notes'))    $pdata['notes']    = $notes;
+      if (hascol('purchases','status'))   $pdata['status']   = 'done';
+      if (hascol('purchases','total'))    $pdata['total']    = $unit_cost * $qty;
+      $purchase_id = insert_filtered('purchases', $pdata);
+
+      // purchase_items (maneja nombres alternativos)
+      $pi = ['purchase_id'=>$purchase_id];
+      if (hascol('purchase_items','variant_id')) $pi['variant_id'] = $variant_id;
+      if (hascol('purchase_items','product_id')) $pi['product_id'] = $product_id;
+
+      if (hascol('purchase_items','quantity')) $pi['quantity'] = $qty;
+      elseif (hascol('purchase_items','qty'))  $pi['qty']      = $qty;
+
+      if (hascol('purchase_items','unit_cost'))     $pi['unit_cost'] = $unit_cost;
+      elseif (hascol('purchase_items','cost_unit')) $pi['cost_unit'] = $unit_cost;
+      elseif (hascol('purchase_items','price_unit'))$pi['price_unit']= $unit_cost;
+
+      if (hascol('purchase_items','subtotal')) $pi['subtotal'] = $unit_cost * $qty;
+
+      foreach(['name'=>$name,'sku'=>$sku,'size'=>$size,'color'=>$color,'measure_text'=>$meas,'image_url'=>$image_url] as $k=>$v){
+        if (hascol('purchase_items',$k)) $pi[$k] = $v;
+      }
+      insert_filtered('purchase_items', $pi);
+    }
+
+    $conexion->commit();
+
+    $okMsg = "✅ Compra cargada. Producto y variante creados correctamente.";
+    $created = [
+      'product_id'=>$product_id,
+      'name'=>$name,
+      'image_url'=>$image_url,
+      'sale_price'=>$sale_price,
+      'qty'=>$qty,
+      'unit_cost'=>$unit_cost
+    ];
+  } catch (Throwable $e) {
+    if (isset($conexion) && $conexion instanceof mysqli) { @$conexion->rollback(); }
+    $errMsg = '❌ '.$e->getMessage();
   }
 }
 ?>
@@ -229,7 +250,7 @@ page_head('Cargar compras y fotos', 'Creá el producto con categoría, subí la 
       <label>SKU <input class="input" name="sku" placeholder="Opcional"></label>
       <label>Talle <input class="input" name="size" placeholder="S / M / L…"></label>
       <label>Color <input class="input" name="color" placeholder="Negro / Azul…"></label>
-      <label>Medidas <input class="input" name="measure_text" placeholder="Ancho x Largo…" <?= $has_measure?'':'disabled' ?>></label>
+      <label>Medidas <input class="input" name="measure_text" placeholder="Ancho x Largo…"></label>
     </div>
 
     <h3>Compra</h3>
@@ -255,8 +276,7 @@ page_head('Cargar compras y fotos', 'Creá el producto con categoría, subí la 
         <?php
           $img = $created['image_url'] ? url($created['image_url']) : ('https://picsum.photos/640/480?random='.(int)$created['product_id']);
         ?>
-        <img src="<?= h($img) ?>"
-             alt="<?= h($created['name']) ?>" loading="lazy" width="640" height="480">
+        <img src="<?= h($img) ?>" alt="<?= h($created['name']) ?>" loading="lazy" width="640" height="480">
         <div class="p">
           <h3><?= h($created['name']) ?></h3>
           <span class="badge">Stock +<?= (int)$created['qty'] ?></span>
