@@ -19,6 +19,9 @@ if ($has_conn) { require $root.'/includes/conn.php'; }
 /* ===== Helpers ===== */
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
+/* Polyfills por si PHP < 8 */
+if (!function_exists('str_contains'))      { function str_contains($h,$n){ return $n!=='' && mb_strpos($h,$n)!==false; } }
+if (!function_exists('str_starts_with'))   { function str_starts_with($h,$n){ return mb_substr($h,0,mb_strlen($n))===$n; } }
 
 /* ===== BASES WEB (sin duplicar /clientes) ===== */
 $script = $_SERVER['SCRIPT_NAME'] ?? '';
@@ -107,7 +110,7 @@ function sales_payload($args){
     'shipping_province'=>$args['prov'],'province'=>$args['prov'],'provincia'=>$args['prov'],
     'shipping_postal'=>$args['post'],'postal'=>$args['post'],'cp'=>$args['post'],
     'shipping_notes'=>$args['notes'],'notes'=>$args['notes'],'observaciones'=>$args['notes'],
-    // tracking (los seteamos luego según el tipo real de columna)
+    // tracking
     'origin'=>'online','origen'=>'online',
     'created_at'=>$now,'fecha'=>$now,
   ];
@@ -130,31 +133,19 @@ function choose_status_value($method, $table, $col){
   $unpaid_methods = ['efectivo','transferencia','cuenta_corriente'];
   $is_unpaid = in_array($method,$unpaid_methods,true);
 
-  // Preferencias por idioma/uso
   $pref_unpaid = ['pendiente','reservado','pending','hold','new','nuevo'];
   $pref_paid   = ['pagado','paid','completada','completed','cerrada','closed'];
 
-  // Si es ENUM('...','...')
   if (str_starts_with($type,'enum(')) {
     preg_match_all("/'([^']+)'/",$type,$m);
     $opts = $m[1] ?? [];
     $prefs = $is_unpaid ? $pref_unpaid : $pref_paid;
-    // Buscar case-insensitive y devolver la opción tal como está en el enum
-    foreach ($prefs as $p) {
-      foreach ($opts as $opt) {
-        if (strcasecmp($p,$opt)===0) return $opt;
-      }
-    }
-    // sino, primera opción del enum
+    foreach ($prefs as $p) foreach ($opts as $opt) if (strcasecmp($p,$opt)===0) return $opt;
     return $opts[0] ?? ($is_unpaid ? 'pendiente' : 'pagado');
   }
-
-  // Si es numérica -> 0/1
   if (preg_match('~^(tinyint|smallint|int|bigint|decimal|double|float)~',$type)) {
     return $is_unpaid ? 0 : 1;
   }
-
-  // Por defecto (varchar/text)
   return $is_unpaid ? 'pendiente' : 'pagado';
 }
 
@@ -163,7 +154,7 @@ function adjust_stock($product_id, $variant_id, $qty_change){
   global $conexion;
   $product_id=(int)$product_id; $variant_id=(int)$variant_id; $qty_change=(int)$qty_change;
 
-  // Primero variantes
+  // variantes
   if (db_has_table('product_variants') && $variant_id>0) {
     $col = hascol('product_variants','stock') ? 'stock' : (hascol('product_variants','existencia') ? 'existencia' : null);
     if ($col) {
@@ -173,7 +164,7 @@ function adjust_stock($product_id, $variant_id, $qty_change){
       }
     }
   }
-  // Si no, en products
+  // producto
   if (db_has_table('products')) {
     $colp = hascol('products','stock') ? 'stock' : (hascol('products','existencia') ? 'existencia' : null);
     if ($colp) {
@@ -211,13 +202,23 @@ function release_expired_reservations(){
           AND (s.id IS NULL OR s.status IS NULL OR s.status NOT IN ('paid','pagado','completed','completada'))";
   if ($rs=@$conexion->query($sql)) {
     while($r=$rs->fetch_assoc()){
+      // reponer stock
       adjust_stock((int)$r['product_id'], (int)$r['variant_id'], + (int)$r['qty']);
+      // cerrar reserva
       if ($st=$conexion->prepare("UPDATE stock_reservations SET released_at=NOW() WHERE id=?")) {
         $st->bind_param('i',$r['id']); $st->execute(); $st->close();
       }
+      // marcar venta como expirada respetando tipo de columna
       if (hascol('sales','status') && (int)$r['sale_id']>0) {
-        if ($st=$conexion->prepare("UPDATE sales SET status=IF(status IN ('paid','pagado','completed','completada'),status,'expired') WHERE id=?")) {
-          $st->bind_param('i',$r['sale_id']); $st->execute(); $st->close();
+        $stype = coltype('sales','status');
+        if (preg_match('~^(tinyint|smallint|int|bigint|decimal|double|float)~',$stype)) {
+          if ($st=$conexion->prepare("UPDATE sales SET status=? WHERE id=?")) {
+            $exp=0; $sid=(int)$r['sale_id']; $st->bind_param('ii',$exp,$sid); $st->execute(); $st->close();
+          }
+        } else {
+          if ($st=$conexion->prepare("UPDATE sales SET status=IF(status IN ('paid','pagado','completed','completada'),status,'expired') WHERE id=?")) {
+            $sid=(int)$r['sale_id']; $st->bind_param('i',$sid); $st->execute(); $st->close();
+          }
         }
       }
     }
@@ -417,7 +418,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             'total'=>$total
           ]);
 
-          // Ajustar status/estado según tipo real de columna
           if (hascol('sales','status')) {
             $sale_payload['status'] = choose_status_value($method,'sales','status');
           }
@@ -449,6 +449,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
           // Vaciar carrito
           $_SESSION['cart'] = [];
           $_SESSION['cart_count'] = 0;
+
+          // Aviso y redirección al inicio (para ver el flash y el contador)
+          $_SESSION['flash_ok'] = "🛒 Pedido #{$ok_sale_id} generado. Podés confirmarlo en Ventas.";
+          header('Location: '.url_public('index.php'));
+          exit;
 
         } catch (Throwable $e) {
           @$conexion->rollback();

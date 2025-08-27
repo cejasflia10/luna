@@ -37,23 +37,75 @@ $db_ok = isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_
 function t_exists($t){ global $conexion; $r=@$conexion->query("SHOW TABLES LIKE '". $conexion->real_escape_string($t) ."'"); return ($r && $r->num_rows>0); }
 function hascol($t,$c){ global $conexion; $r=@$conexion->query("SHOW COLUMNS FROM `$t` LIKE '".$conexion->real_escape_string($c)."'"); return ($r && $r->num_rows>0); }
 
-/* ===== Stock helpers ===== */
+/* ===== Stock helpers (con activar/desactivar producto) ===== */
+function stock_column($table){
+  if (hascol($table,'stock')) return 'stock';
+  if (hascol($table,'existencia')) return 'existencia';
+  return null;
+}
+function product_stock_left($product_id){
+  global $conexion;
+  $pid=(int)$product_id;
+  // Variantes: sumar
+  if (t_exists('product_variants')) {
+    $colv = stock_column('product_variants');
+    if ($colv) {
+      if ($st=$conexion->prepare("SELECT COALESCE(SUM(`$colv`),0) s FROM product_variants WHERE product_id=?")){
+        $st->bind_param('i',$pid); $st->execute();
+        $s = (float)($st->get_result()->fetch_row()[0] ?? 0); $st->close();
+        return $s;
+      }
+    }
+  }
+  // Producto simple
+  if (t_exists('products')) {
+    $colp = stock_column('products');
+    if ($colp && ($st=$conexion->prepare("SELECT COALESCE(`$colp`,0) FROM products WHERE id=? LIMIT 1"))){
+      $st->bind_param('i',$pid); $st->execute();
+      $s = (float)($st->get_result()->fetch_row()[0] ?? 0); $st->close();
+      return $s;
+    }
+  }
+  return null; // desconocido
+}
+function set_product_active($product_id, $active){
+  global $conexion;
+  if (!t_exists('products') || !hascol('products','active')) return;
+  if ($st=$conexion->prepare("UPDATE products SET active=? WHERE id=?")){
+    $a = $active ? 1 : 0; $pid=(int)$product_id;
+    $st->bind_param('ii',$a,$pid); $st->execute(); $st->close();
+  }
+}
+function maybe_deactivate_if_zero($product_id){
+  $left = product_stock_left($product_id);
+  if ($left!==null && $left<=0) set_product_active($product_id, 0);
+}
+function maybe_reactivate_if_available($product_id){
+  $left = product_stock_left($product_id);
+  if ($left!==null && $left>0) set_product_active($product_id, 1);
+}
 function adjust_stock($product_id, $variant_id, $qty_change){
   global $conexion;
   $product_id=(int)$product_id; $variant_id=(int)$variant_id; $qty_change=(int)$qty_change;
 
   if (t_exists('product_variants') && $variant_id>0) {
-    $col = hascol('product_variants','stock') ? 'stock' : (hascol('product_variants','existencia') ? 'existencia' : null);
+    $col = stock_column('product_variants');
     if ($col && ($st=$conexion->prepare("UPDATE product_variants SET `$col`=GREATEST(0,`$col`+?) WHERE id=? AND product_id=?"))) {
       $st->bind_param('iii',$qty_change,$variant_id,$product_id);
-      $st->execute(); $st->close(); return;
+      $st->execute(); $st->close();
+      // actualizar estado visible
+      if ($qty_change<0) maybe_deactivate_if_zero($product_id);
+      else maybe_reactivate_if_available($product_id);
+      return;
     }
   }
   if (t_exists('products')) {
-    $colp = hascol('products','stock') ? 'stock' : (hascol('products','existencia') ? 'existencia' : null);
+    $colp = stock_column('products');
     if ($colp && ($st=$conexion->prepare("UPDATE products SET `$colp`=GREATEST(0,`$colp`+?) WHERE id=?"))) {
       $st->bind_param('ii',$qty_change,$product_id);
       $st->execute(); $st->close();
+      if ($qty_change<0) maybe_deactivate_if_zero($product_id);
+      else maybe_reactivate_if_available($product_id);
     }
   }
 }
@@ -200,7 +252,7 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST') {
       $sale_id = max(0,(int)($_POST['sale_id'] ?? 0));
       if ($sale_id<=0) throw new Exception('Venta inválida');
 
-      // leer venta original para calcular totales
+      // leer venta original
       $row=null;
       if ($st=$conexion->prepare("SELECT * FROM sales WHERE id=?")) {
         $st->bind_param('i',$sale_id); $st->execute(); $row=$st->get_result()->fetch_assoc(); $st->close();
@@ -238,8 +290,6 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST') {
         'total'          => $final_total,
         'paid_at'        => date('Y-m-d H:i:s')
       ];
-
-      // sumar descuentos/recargos si existen
       if (hascol('sales','discount')) { $upd['discount'] = (float)($row['discount'] ?? 0) + $extra_discount; }
       if (hascol('sales','fee'))      { $upd['fee']      = (float)($row['fee'] ?? 0)      + $extra_fee; }
 
@@ -661,12 +711,12 @@ function row_get($row, $keys, $default=''){
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>
-        <input class="input" name="item_sku[]" placeholder="SKU" value="${sku}">
+        <input class="input" name="item_sku[]" placeholder="SKU" value="\${sku}">
         <small style="opacity:.8">Tip: escaneá o escribí SKU y presioná 🔍</small>
       </td>
-      <td><input class="input" type="number" min="1" name="item_qty[]" value="${qty}"></td>
-      <td><input class="input" type="number" step="0.01" min="0" name="item_price[]" value="${price}"></td>
-      <td><input class="input" name="item_name_display[]" value="${name}" placeholder="(se completa al buscar)"></td>
+      <td><input class="input" type="number" min="1" name="item_qty[]" value="\${qty}"></td>
+      <td><input class="input" type="number" step="0.01" min="0" name="item_price[]" value="\${price}"></td>
+      <td><input class="input" name="item_name_display[]" value="\${name}" placeholder="(se completa al buscar)"></td>
       <td style="white-space:nowrap">
         <button type="button" class="btn find">🔍</button>
         <button type="button" class="btn del">🗑</button>
