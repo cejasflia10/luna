@@ -1,7 +1,7 @@
 <?php
 if (session_status()===PHP_SESSION_NONE) session_start();
 
-/* ===== Resolver $root robusto ===== */
+/* ===== Resolver $root ===== */
 $root = __DIR__;
 for ($i=0; $i<6; $i++) {
   if (file_exists($root.'/includes/conn.php')) break;
@@ -9,28 +9,18 @@ for ($i=0; $i<6; $i++) {
 }
 
 /* ===== Includes tolerantes ===== */
-if (file_exists($root.'/includes/conn.php')) {
-  require $root.'/includes/conn.php';
-}
-if (file_exists($root.'/includes/helpers.php')) {
-  require $root.'/includes/helpers.php';
-}
-if (file_exists($root.'/includes/page_head.php')) {
-  require $root.'/includes/page_head.php';
-} else {
-  // Fallback por si no existe page_head.php
-  if (!function_exists('page_head')) {
-    function page_head($title,$sub=''){
-      echo '<header class="container" style="padding:16px 0"><h1 style="margin:0">'
-           .htmlspecialchars($title).'</h1>'
-           .($sub?'<div style="opacity:.8">'.$sub.'</div>':'')
-           .'</header>';
-    }
+if (file_exists($root.'/includes/conn.php')) { require $root.'/includes/conn.php'; }
+if (file_exists($root.'/includes/helpers.php')) { require $root.'/includes/helpers.php'; }
+if (file_exists($root.'/includes/page_head.php')) { require $root.'/includes/page_head.php'; }
+if (!function_exists('page_head')) {
+  function page_head($title,$sub=''){
+    echo '<header class="container" style="padding:16px 0"><h1 style="margin:0">'
+         .htmlspecialchars($title).'</h1>'.($sub?'<div style="opacity:.8">'.$sub.'</div>':'').'</header>';
   }
 }
 
-/* ===== Helpers locales ===== */
-if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
+/* ===== Helpers ===== */
+if (!function_exists('h')) { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
 
 /* ===== URL base ===== */
@@ -46,21 +36,20 @@ $db_ok = isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_
 function t_exists($t){ global $conexion; $r=@$conexion->query("SHOW TABLES LIKE '". $conexion->real_escape_string($t) ."'"); return ($r && $r->num_rows>0); }
 function hascol($t,$c){ global $conexion; $r=@$conexion->query("SHOW COLUMNS FROM `$t` LIKE '".$conexion->real_escape_string($c)."'"); return ($r && $r->num_rows>0); }
 
-/* ===== Stock helper (producto o variante) ===== */
+/* ===== Stock helpers ===== */
 function adjust_stock($product_id, $variant_id, $qty_change){
   global $conexion;
   $product_id=(int)$product_id; $variant_id=(int)$variant_id; $qty_change=(int)$qty_change;
 
-  // Variantes
+  // variantes
   if (t_exists('product_variants') && $variant_id>0) {
     $col = hascol('product_variants','stock') ? 'stock' : (hascol('product_variants','existencia') ? 'existencia' : null);
     if ($col && ($st=$conexion->prepare("UPDATE product_variants SET `$col`=GREATEST(0,`$col`+?) WHERE id=? AND product_id=?"))) {
       $st->bind_param('iii',$qty_change,$variant_id,$product_id);
-      $st->execute(); $st->close();
-      return;
+      $st->execute(); $st->close(); return;
     }
   }
-  // Productos
+  // productos
   if (t_exists('products')) {
     $colp = hascol('products','stock') ? 'stock' : (hascol('products','existencia') ? 'existencia' : null);
     if ($colp && ($st=$conexion->prepare("UPDATE products SET `$colp`=GREATEST(0,`$colp`+?) WHERE id=?"))) {
@@ -70,7 +59,7 @@ function adjust_stock($product_id, $variant_id, $qty_change){
   }
 }
 
-/* ===== Reservas (opcional) ===== */
+/* ===== Reservas ===== */
 function reservations_table_exists(){ return t_exists('stock_reservations'); }
 function close_reservations_without_restock($sale_id){
   global $conexion;
@@ -115,7 +104,7 @@ function restock_from_sale_items($sale_id){
   return $found;
 }
 
-/* ===== Setear estado de forma segura (por si status es ENUM distinto) ===== */
+/* ===== Setear estado de forma segura ===== */
 function safe_update_status($sale_id, array $candidates){
   global $conexion;
   if (!hascol('sales','status')) return;
@@ -128,7 +117,7 @@ function safe_update_status($sale_id, array $candidates){
   }
 }
 
-/* ===== AJAX: buscar por SKU (POS) ===== */
+/* ===== AJAX find SKU ===== */
 if ($db_ok && (($_GET['__ajax'] ?? '')==='find_sku')) {
   header('Content-Type: application/json; charset=utf-8');
   try {
@@ -136,7 +125,6 @@ if ($db_ok && (($_GET['__ajax'] ?? '')==='find_sku')) {
     if ($sku==='') throw new Exception('SKU vacío');
     $out = ['ok'=>false];
 
-    // Variante por SKU
     if (t_exists('product_variants') && t_exists('products')) {
       $sql = "SELECT v.id AS variant_id, v.price AS vprice, p.id AS product_id, p.name AS pname
               FROM product_variants v
@@ -147,20 +135,12 @@ if ($db_ok && (($_GET['__ajax'] ?? '')==='find_sku')) {
         $st->execute();
         $res = $st->get_result();
         if ($row = $res->fetch_assoc()) {
-          $out = [
-            'ok'=>true,
-            'product_id'=>(int)$row['product_id'],
-            'variant_id'=>(int)$row['variant_id'],
-            'name'=>(string)$row['pname'],
-            'price'=>(float)($row['vprice'] ?? 0),
-            'source'=>'variant'
-          ];
+          $out = ['ok'=>true,'product_id'=>(int)$row['product_id'],'variant_id'=>(int)$row['variant_id'],
+                  'name'=>$row['pname'],'price'=>(float)($row['vprice'] ?? 0),'source'=>'variant'];
         }
         $st->close();
       }
     }
-
-    // Producto por SKU si no hubo variante
     if (!$out['ok'] && t_exists('products')) {
       $sql = "SELECT id, name, price FROM products WHERE sku=? LIMIT 1";
       if ($st = $conexion->prepare($sql)) {
@@ -168,19 +148,12 @@ if ($db_ok && (($_GET['__ajax'] ?? '')==='find_sku')) {
         $st->execute();
         $res = $st->get_result();
         if ($row = $res->fetch_assoc()) {
-          $out = [
-            'ok'=>true,
-            'product_id'=>(int)$row['id'],
-            'variant_id'=>0,
-            'name'=>(string)$row['name'],
-            'price'=>(float)($row['price'] ?? 0),
-            'source'=>'product'
-          ];
+          $out = ['ok'=>true,'product_id'=>(int)$row['id'],'variant_id'=>0,
+                  'name'=>$row['name'],'price'=>(float)($row['price'] ?? 0),'source'=>'product'];
         }
         $st->close();
       }
     }
-
     if (!$out['ok']) throw new Exception('No se encontró SKU');
     echo json_encode($out); exit;
   } catch(Throwable $e) {
@@ -198,8 +171,9 @@ $PAY_METHODS = [
   'mp'            => 'Mercado Pago',
 ];
 $DISCOUNT_OPTIONS = [0,5,10,15,20,25];
+$UNPAID_METHODS = ['efectivo','transferencia','cuenta_corriente'];
 
-/* ===== Acciones de gestión ONLINE (confirmar / cancelar) ===== */
+/* ===== Acciones confirmar/cancelar online ===== */
 $okMsg=''; $errMsg='';
 if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST') {
   $act = $_POST['__action'] ?? '';
@@ -211,27 +185,16 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST') {
       $conexion->begin_transaction();
 
       if ($act==='mark_online_paid') {
-        // Confirmar: marcar como done/paid y cerrar reservas SIN devolver stock
-        if (hascol('sales','status')) {
-          safe_update_status($sale_id, ['done','paid','pagado','completed','completada']);
-        }
+        safe_update_status($sale_id, ['done','paid','pagado','completed','completada']);
         if (hascol('sales','paid_at')) {
           if ($st=$conexion->prepare("UPDATE sales SET paid_at=NOW() WHERE id=?")) { $st->bind_param('i',$sale_id); $st->execute(); $st->close(); }
         }
         close_reservations_without_restock($sale_id);
         $okMsg = "✅ Venta #$sale_id confirmada (pago ok).";
-
-      } elseif ($act==='cancel_online') {
-        // Cancelar: devolver stock y marcar cancelada
-        $done=false;
-        // Si hay reservas, restock desde reservas
+      } else {
         $done = restock_from_reservations($sale_id);
-        // Si no hay reservas, restock desde los items de la venta
         if (!$done) { restock_from_sale_items($sale_id); }
-
-        if (hascol('sales','status')) {
-          safe_update_status($sale_id, ['cancelled','canceled','anulada','rejected','rechazada','expired','expirada']);
-        }
+        safe_update_status($sale_id, ['cancelled','canceled','anulada','rejected','rechazada','expired','expirada']);
         $okMsg = "↩️ Venta #$sale_id cancelada y stock devuelto.";
       }
 
@@ -246,7 +209,6 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST') {
 /* ===== Guardar venta POS ===== */
 if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'] ?? '')==='create_sale')) {
   try {
-    // Tablas mínimas
     if (!t_exists('sales')) {
       @$conexion->query("CREATE TABLE IF NOT EXISTS sales (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -278,7 +240,6 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     }
 
-    // Datos del formulario POS
     $customer     = trim((string)($_POST['customer'] ?? ''));
     $payment      = trim((string)($_POST['payment_method'] ?? 'efectivo'));
     if (!isset($PAY_METHODS[$payment])) $payment = 'efectivo';
@@ -286,7 +247,6 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
     $discount_pct = (int)($_POST['discount_pct'] ?? 0);
     if (!in_array($discount_pct,$DISCOUNT_OPTIONS,true)) $discount_pct = 0;
 
-    // Ítems
     $skus   = $_POST['item_sku']   ?? [];
     $qtys   = $_POST['item_qty']   ?? [];
     $prices = $_POST['item_price'] ?? [];
@@ -301,25 +261,6 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
 
       $pid=0; $vid=0; $name='Item'; $price=0.0;
 
-      // Variante por SKU
-      if (t_exists('product_variants') && t_exists('products')) {
-        $sql = "SELECT v.id AS vid,v.price AS vprice,p.id AS pid,p.name AS pname
-                FROM product_variants v
-                JOIN products p ON p.id=v.product_id
-                WHERE v.sku=? LIMIT 1";
-        if ($st=$conexion->prepare($sql)) {
-          $st->bind_param('s',$sku);
-          $st->execute();
-          $res=$st->get_result();
-          if ($r=$res->fetch_assoc()) {
-            $pid=(int)$r['id']; // cuidado: $r['id'] no existe, usamos pid/vid abajo
-          }
-          $st->close();
-        }
-      }
-
-      // Reconsultar bien porque arriba no mapeamos
-      $pid=0; $vid=0; $name='Item'; $price=0.0;
       if (t_exists('product_variants') && t_exists('products')) {
         $sql = "SELECT v.id AS vid,v.price AS vprice,p.id AS pid,p.name AS pname
                 FROM product_variants v
@@ -373,7 +314,6 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
     $sale_id = (int)$st->insert_id;
     $st->close();
 
-    // Ítems + stock
     $sqlI = "INSERT INTO sale_items (sale_id, product_id, variant_id, name, qty, price_unit, line_total) VALUES (?,?,?,?,?,?,?)";
     $sti = $conexion->prepare($sqlI);
     if (!$sti) throw new Exception('SQL PREPARE sale_items: '.$conexion->error);
@@ -394,34 +334,43 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
   }
 }
 
-/* ===== Consultar PENDIENTES ONLINE para confirmar ===== */
+/* ===== Pendientes ONLINE ===== */
 $pending = [];
 if ($db_ok && t_exists('sales')) {
-  $where = [];
-  // origen online o indicio de envío
+  $cond = [];
+
+  // origen/indicios de online
   if (hascol('sales','origin')) {
-    $where[] = "origin='online'";
+    $cond[] = "origin='online'";
   } elseif (hascol('sales','shipping_method')) {
-    $where[] = "(shipping_method IS NOT NULL AND shipping_method<>'')";
+    $cond[] = "(shipping_method IS NOT NULL AND shipping_method<>'')";
+  } elseif (hascol('sales','customer_email')) {
+    $cond[] = "(customer_email IS NOT NULL AND customer_email<>'')";
   } else {
-    $where[] = "1=1";
+    $cond[] = "1=1";
   }
 
-  // estados pendientes
+  // estados: excluir sólo finales
+  $finalStates = ["'done'","'paid'","'pagado'","'completed'","'completada'","'cancelled'","'canceled'","'anulada'","'rejected'","'rechazada'","'expired'","'expirada'"];
   if (hascol('sales','status')) {
-    $where[] = "(status IS NULL OR status='' OR status IN ('new','pending','pendiente','unpaid','sin_pago','por_confirmar','created'))";
+    $cond[] = "(status IS NULL OR status='' OR status NOT IN(".implode(',',$finalStates)."))";
   } elseif (hascol('sales','created_at')) {
-    $where[] = "created_at >= NOW() - INTERVAL 2 DAY";
+    $cond[] = "created_at >= NOW() - INTERVAL 7 DAY";
+  }
+
+  // si existe paid_at, considerar pendiente cuando no tiene fecha de pago
+  if (hascol('sales','paid_at')) {
+    $cond[] = "(paid_at IS NULL)";
   }
 
   $order = hascol('sales','created_at') ? "ORDER BY created_at DESC" : "ORDER BY id DESC";
-  $sql   = "SELECT * FROM sales WHERE ".implode(' AND ',$where)." $order LIMIT 50";
+  $sql   = "SELECT * FROM sales WHERE ".implode(' AND ',$cond)." $order LIMIT 100";
   if ($rs=@$conexion->query($sql)) {
     while($r=$rs->fetch_assoc()) $pending[]=$r;
   }
 }
 
-/* ===== Helpers de lectura flexible de fila sales ===== */
+/* ===== Helper de fila ===== */
 function row_get($row, $keys, $default=''){
   foreach ($keys as $k) if (array_key_exists($k,$row) && $row[$k]!==null && $row[$k]!=='') return $row[$k];
   return $default;
@@ -447,7 +396,6 @@ function row_get($row, $keys, $default=''){
     .ok{background:#1b2a1d;border:1px solid #14532d;color:#bbf7d0;border-radius:8px;padding:10px;margin:10px 0}
     .card{background:var(--card,#12141a);border:1px solid var(--ring,#2d323d);border-radius:12px;padding:12px}
     .container{max-width:1100px;margin:0 auto;padding:0 14px}
-    .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--ring,#2d323d);border-radius:999px}
   </style>
 </head>
 <body>
@@ -461,28 +409,21 @@ function row_get($row, $keys, $default=''){
   <?php if($okMsg): ?><div class="ok"><?=h($okMsg)?></div><?php endif; ?>
   <?php if($errMsg): ?><div class="alert"><?=h($errMsg)?></div><?php endif; ?>
 
-  <!-- ====== Pendientes Online ====== -->
+  <!-- ===== Pendientes online ===== -->
   <section class="card" style="margin-bottom:16px">
     <h2 style="margin-top:0">🛒 Pendientes online para confirmar</h2>
     <?php if (!$db_ok): ?>
       <div class="alert">No hay conexión a la base de datos.</div>
     <?php elseif (!t_exists('sales')): ?>
-      <div>No hay tabla <code>sales</code> aún.</div>
+      <div>No existe la tabla <code>sales</code>.</div>
     <?php elseif (!$pending): ?>
-      <div class="pill">Sin pendientes online.</div>
+      <div style="opacity:.9">Sin pendientes online detectados.</div>
     <?php else: ?>
       <div style="overflow:auto">
         <table class="table">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Fecha</th>
-              <th>Cliente</th>
-              <th>Pago</th>
-              <th>Tipo</th>
-              <th>Total</th>
-              <th>Estado</th>
-              <th style="width:240px">Acciones</th>
+              <th>ID</th><th>Fecha</th><th>Cliente</th><th>Pago</th><th>Tipo</th><th>Total</th><th>Estado</th><th style="width:240px">Acciones</th>
             </tr>
           </thead>
           <tbody>
@@ -524,7 +465,7 @@ function row_get($row, $keys, $default=''){
     <?php endif; ?>
   </section>
 
-  <!-- ====== POS / Venta en local ====== -->
+  <!-- ===== POS (local) ===== -->
   <h2>➕ Nueva venta (Local)</h2>
   <form class="card" method="post">
     <input type="hidden" name="__action" value="create_sale">
@@ -538,9 +479,7 @@ function row_get($row, $keys, $default=''){
       </label>
       <label>Método de pago
         <select class="input" name="payment_method" required>
-          <?php foreach($PAY_METHODS as $k=>$v): ?>
-            <option value="<?=$k?>"><?=$v?></option>
-          <?php endforeach; ?>
+          <?php foreach($PAY_METHODS as $k=>$v): ?><option value="<?=$k?>"><?=$v?></option><?php endforeach; ?>
         </select>
       </label>
       <label>Cuotas (si aplica)
@@ -557,9 +496,7 @@ function row_get($row, $keys, $default=''){
       </label>
       <label>Descuento POS
         <select class="input" name="discount_pct">
-          <?php foreach($DISCOUNT_OPTIONS as $d): ?>
-            <option value="<?=$d?>"><?=$d?>%</option>
-          <?php endforeach; ?>
+          <?php foreach($DISCOUNT_OPTIONS as $d): ?><option value="<?=$d?>"><?=$d?>%</option><?php endforeach; ?>
         </select>
       </label>
       <div></div>
@@ -567,9 +504,7 @@ function row_get($row, $keys, $default=''){
 
     <h3>Ítems</h3>
     <table class="table" id="items">
-      <thead>
-        <tr><th style="width:36%">SKU</th><th>Cant.</th><th>Unit. $</th><th>Nombre</th><th></th></tr>
-      </thead>
+      <thead><tr><th style="width:36%">SKU</th><th>Cant.</th><th>Unit. $</th><th>Nombre</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
     <div style="margin:8px 0">
