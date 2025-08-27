@@ -31,12 +31,12 @@ if (!function_exists('urlc')) {
   function urlc($path){ return url_public('clientes/'.ltrim((string)$path,'/')); }
 }
 
-/* ===== Config pagos (SIN descuentos) ===== */
+/* ===== Config pagos (SIN descuentos de tienda online) ===== */
 $PAY_METHODS = [
   'efectivo'         => ['label'=>'Efectivo'],
   'transferencia'    => ['label'=>'Transferencia'],
   'debito'           => ['label'=>'Débito',  'installments'=>[1=>0]],
-  // Recargo en crédito por cuotas (si no querés recargo, poné todos en 0)
+  // Si no querés recargo por cuotas, cambiá los valores a 0
   'credito'          => ['label'=>'Crédito', 'installments'=>[1=>0, 3=>10, 6=>20, 12=>35]],
   'cuenta_corriente' => ['label'=>'Cuenta Corriente'],
 ];
@@ -142,10 +142,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         $items[]=['pid'=>$pid,'vid'=>$vid,'name'=>$nameP,'qty'=>$qty,'price'=>$price,'line_total'=>$lt];
       }
 
-      // Pago (SIN DESCUENTOS)
+      // Pago (SIN DESCUENTOS en tienda online)
       $method   = $payment['method'] ?? 'efectivo';
       $cuotas   = (int)($payment['installments'] ?? 1);
-      $discount = 0.0; // <- sin descuentos
+      $discount = 0.0; // sin descuento
       $fee      = 0.0;
       if ($method==='credito' && !empty($PAY_METHODS['credito']['installments'][$cuotas])) {
         $fee = $subtotal * ($PAY_METHODS['credito']['installments'][$cuotas]/100);
@@ -206,7 +206,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
           $conexion->begin_transaction();
 
-          // Intento extendido (con columnas de envío)
+          // Insert extendido (con columnas de envío)
           $sql = "INSERT INTO sales
             (customer_name, customer_phone, customer_email, payment_method, installments, subtotal, discount, fee,
              shipping_method, shipping_cost, shipping_address, shipping_city, shipping_province, shipping_postal, shipping_notes,
@@ -215,7 +215,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
           $stmt = $conexion->prepare($sql);
           if (!$stmt) { throw new Exception("SQL PREPARE sales: ".$conexion->error." — ".$sql); }
 
-          // Tipos: s s s s i d d d s d s s s s s d
+          // Tipos: s s s s i d d d s d s s s s s d  (16)
           $types = "ssssidddsdsssssd";
           $addr  = (string)($shipping['address']??'');
           $city  = (string)($shipping['city']??'');
@@ -232,6 +232,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
           $stmt->execute();
           $sale_id = (int)$stmt->insert_id;
           $stmt->close();
+
+          // Marcar origin='online' si existe la columna
+          if (($rso=@$conexion->query("SHOW COLUMNS FROM sales LIKE 'origin'")) && $rso->num_rows>0) {
+            if ($st2=$conexion->prepare("UPDATE sales SET origin='online' WHERE id=?")) {
+              $st2->bind_param('i', $sale_id);
+              $st2->execute();
+              $st2->close();
+            }
+          }
 
           // Ítems
           $sqlItems = "INSERT INTO sale_items
@@ -257,11 +266,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
           $_SESSION['cart_count'] = 0;
 
         } catch (Throwable $e) {
-          // Fallback para schema antiguo (sin columnas de envío) o errores
-          if ($conexion && $conexion->errno===0) { /* noop */ }
+          // Fallback para schema antiguo (sin columnas de envío)
           @$conexion->rollback();
           try {
             $conexion->begin_transaction();
+
             $sql = "INSERT INTO sales
               (customer_name, customer_phone, customer_email, payment_method, installments, subtotal, discount, fee, total, status)
               VALUES (?,?,?,?,?,?,?,?,?, 'new')";
@@ -273,6 +282,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             $stmt->execute();
             $sale_id = (int)$stmt->insert_id;
             $stmt->close();
+
+            // origin en fallback si existe
+            if (($rso=@$conexion->query("SHOW COLUMNS FROM sales LIKE 'origin'")) && $rso->num_rows>0) {
+              if ($st2=$conexion->prepare("UPDATE sales SET origin='online' WHERE id=?")) {
+                $st2->bind_param('i', $sale_id);
+                $st2->execute();
+                $st2->close();
+              }
+            }
 
             $sqlItems = "INSERT INTO sale_items
               (sale_id, product_id, variant_id, name, qty, price_unit, line_total)
@@ -287,6 +305,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
               $sti->execute();
             }
             $sti->close();
+
             $conexion->commit();
             $ok_sale_id = $sale_id;
 
@@ -335,9 +354,8 @@ foreach ($cart as $k => $it) {
 /* ===== Totales (SIN descuentos) ===== */
 $method   = $payment['method'] ?? 'efectivo';
 $cuotas   = (int)($payment['installments'] ?? 1);
-$discount = 0.0; // <- no se aplican descuentos en la tienda
+$discount = 0.0; // no se aplican descuentos en la tienda
 $fee      = 0.0;
-
 if ($method==='credito' && !empty($PAY_METHODS['credito']['installments'][$cuotas])) {
   $fee = $subtotal * ($PAY_METHODS['credito']['installments'][$cuotas]/100);
 }
@@ -505,7 +523,7 @@ $cart_empty = empty($items);
     (function(){
       const radios = document.querySelectorAll('input[name="ship_method"]');
       const addr = document.getElementById('addr');
-      function sync(){ 
+      function sync(){
         let sel = document.querySelector('input[name="ship_method"]:checked');
         addr.style.display = (sel && sel.value==='envio') ? '' : 'none';
       }

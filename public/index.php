@@ -18,6 +18,7 @@ if (!function_exists('money')) { function money($n){ return number_format((float
 $script = $_SERVER['SCRIPT_NAME'] ?? '';
 $dir    = rtrim(dirname($script), '/\\');                 // /.../public  o  /.../public/clientes
 $PUBLIC_BASE = preg_match('~/(clientes)(/|$)~', $dir) ? rtrim(dirname($dir), '/\\') : $dir;
+if ($PUBLIC_BASE==='') $PUBLIC_BASE = '/';
 
 if (!function_exists('url_public')) {
   function url_public($path){
@@ -25,7 +26,7 @@ if (!function_exists('url_public')) {
     return rtrim($PUBLIC_BASE,'/').'/'.ltrim((string)$path,'/');
   }
 }
-if (!function_exists('urlc')) { // por si querés linkear a la tienda
+if (!function_exists('urlc')) { // linkear a la tienda
   function urlc($path){ return url_public('clientes/'.ltrim((string)$path,'/')); }
 }
 
@@ -62,31 +63,60 @@ if ($db_ok) {
   }
 }
 
-/* ========= Indicador de pedidos nuevos ========= */
-$newCount = 0;
+/* ========= Indicador de pedidos nuevos (sin encadenar ->num_rows) ========= */
+$newCount = 0; $envioCount = 0; $retiroCount = 0;
+
 if ($db_ok) {
-  $q = @$conexion->query("SHOW TABLES LIKE 'sales'"); $has_sales = ($q && $q->num_rows>0);
+  // Ventas
+  $rs = @$conexion->query("SHOW TABLES LIKE 'sales'");
+  $has_sales = ($rs && $rs->num_rows>0);
   if ($has_sales) {
-    $has_status = !!(@$conexion->query("SHOW COLUMNS FROM sales LIKE 'status'")->num_rows ?? 0);
-    $has_created_sales = !!(@$conexion->query("SHOW COLUMNS FROM sales LIKE 'created_at'")->num_rows ?? 0);
+    $rs = @$conexion->query("SHOW COLUMNS FROM sales LIKE 'status'");
+    $has_status = ($rs && $rs->num_rows>0);
+
+    $rs = @$conexion->query("SHOW COLUMNS FROM sales LIKE 'created_at'");
+    $has_created = ($rs && $rs->num_rows>0);
+
+    $rs = @$conexion->query("SHOW COLUMNS FROM sales LIKE 'shipping_method'");
+    $has_shipmeth = ($rs && $rs->num_rows>0);
+
     if ($has_status) {
-      $rs = @$conexion->query("SELECT COUNT(*) c FROM sales WHERE status='new'");
-      if ($rs) $newCount += (int)$rs->fetch_assoc()['c'];
-    } elseif ($has_created_sales) {
-      $rs = @$conexion->query("SELECT COUNT(*) c FROM sales WHERE created_at >= NOW() - INTERVAL 2 DAY");
-      if ($rs) $newCount += (int)$rs->fetch_assoc()['c'];
+      if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE status='new'")) {
+        $row=$rs->fetch_assoc(); $newCount += (int)($row['c'] ?? 0);
+      }
+      if ($has_shipmeth) {
+        if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE status='new' AND shipping_method='envio'"))  { $row=$rs->fetch_assoc(); $envioCount  = (int)($row['c'] ?? 0); }
+        if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE status='new' AND shipping_method='retiro'")) { $row=$rs->fetch_assoc(); $retiroCount = (int)($row['c'] ?? 0); }
+      }
+    } elseif ($has_created) {
+      if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE created_at >= NOW() - INTERVAL 2 DAY")) {
+        $row=$rs->fetch_assoc(); $newCount += (int)($row['c'] ?? 0);
+      }
+      if ($has_shipmeth) {
+        if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE shipping_method='envio' AND created_at >= NOW() - INTERVAL 2 DAY"))  { $row=$rs->fetch_assoc(); $envioCount  = (int)($row['c'] ?? 0); }
+        if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE shipping_method='retiro' AND created_at >= NOW() - INTERVAL 2 DAY")) { $row=$rs->fetch_assoc(); $retiroCount = (int)($row['c'] ?? 0); }
+      }
     }
   }
-  $q = @$conexion->query("SHOW TABLES LIKE 'reservations'"); $has_res = ($q && $q->num_rows>0);
+
+  // Reservas (opcional)
+  $rs = @$conexion->query("SHOW TABLES LIKE 'reservations'");
+  $has_res = ($rs && $rs->num_rows>0);
   if ($has_res) {
-    $has_rstatus  = !!(@$conexion->query("SHOW COLUMNS FROM reservations LIKE 'status'")->num_rows ?? 0);
-    $has_rcreated = !!(@$conexion->query("SHOW COLUMNS FROM reservations LIKE 'created_at'")->num_rows ?? 0);
+    $rs = @$conexion->query("SHOW COLUMNS FROM reservations LIKE 'status'");
+    $has_rstatus = ($rs && $rs->num_rows>0);
+
+    $rs = @$conexion->query("SHOW COLUMNS FROM reservations LIKE 'created_at'");
+    $has_rcreated = ($rs && $rs->num_rows>0);
+
     if ($has_rstatus) {
-      $rs = @$conexion->query("SELECT COUNT(*) c FROM reservations WHERE status='new'");
-      if ($rs) $newCount += (int)$rs->fetch_assoc()['c'];
+      if ($rs=@$conexion->query("SELECT COUNT(*) c FROM reservations WHERE status='new'")) {
+        $row=$rs->fetch_assoc(); $newCount += (int)($row['c'] ?? 0);
+      }
     } elseif ($has_rcreated) {
-      $rs = @$conexion->query("SELECT COUNT(*) c FROM reservations WHERE created_at >= NOW() - INTERVAL 2 DAY");
-      if ($rs) $newCount += (int)$rs->fetch_assoc()['c'];
+      if ($rs=@$conexion->query("SELECT COUNT(*) c FROM reservations WHERE created_at >= NOW() - INTERVAL 2 DAY")) {
+        $row=$rs->fetch_assoc(); $newCount += (int)($row['c'] ?? 0);
+      }
     }
   }
 }
@@ -119,7 +149,6 @@ $rot_words = [
     .container{max-width:1100px;margin:0 auto;padding:0 14px}
     .hero{padding:36px 0;text-align:center}
 
-    /* ==== Rotador con destellos ==== */
     .rotator{display:inline-block;position:relative;font-weight:800;letter-spacing:.02em;animation:twinkle 2.4s ease-in-out infinite}
     .rot-out{opacity:.08;filter:blur(1px);transition:opacity .26s linear,filter .26s linear}
     @keyframes twinkle{0%,100%{text-shadow:0 0 0px #fff}50%{text-shadow:0 0 10px rgba(255,255,255,.7),0 0 28px rgba(255,255,255,.25)}}
@@ -147,8 +176,18 @@ $rot_words = [
       <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
         <a class="cta" href="<?= url_public('productos.php') ?>">➕ Cargar producto</a>
         <a class="cta" href="<?= urlc('index.php') ?>">🛍️ Ir a la tienda</a>
+
         <?php if($newCount>0): ?>
-          <span class="pill">🔔 <b><?= (int)$newCount ?></b> nuevo<?= $newCount>1?'s':'' ?> (pedidos / reservas)</span>
+          <?php if($envioCount>0 || $retiroCount>0): ?>
+            <span class="pill">
+              🔔 <b><?= (int)$newCount ?></b> nuevos —
+              <?= $envioCount>0 ? ("🚚 ".$envioCount." env&iacute;o".($envioCount>1?'s':'')) : '' ?>
+              <?= ($envioCount>0 && $retiroCount>0) ? " · " : "" ?>
+              <?= $retiroCount>0 ? ("🏬 ".$retiroCount." retiro".($retiroCount>1?'s':'')) : '' ?>
+            </span>
+          <?php else: ?>
+            <span class="pill">🔔 <b><?= (int)$newCount ?></b> nuevo<?= $newCount>1?'s':'' ?> (pedidos / reservas)</span>
+          <?php endif; ?>
         <?php endif; ?>
       </div>
     </div>

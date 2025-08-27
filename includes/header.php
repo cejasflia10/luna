@@ -87,3 +87,68 @@ $menu = $is_client_area ? $menu_client : $menu_admin;
   });
 })();
 </script>
+
+<?php
+/* ===== Banner: Aviso de nueva compra (solo en index del ADMIN) ===== */
+try {
+  $is_home_admin = (!$is_client_area) && preg_match('~/index\.php$~', $script);
+  if ($is_home_admin && isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno) {
+
+    // ¿existe la tabla sales?
+    $has_sales = false;
+    if ($rs = @$conexion->query("SHOW TABLES LIKE 'sales'")) {
+      $has_sales = ($rs->num_rows > 0);
+      @$rs->free();
+    }
+
+    if ($has_sales) {
+      // ¿existe la columna shipping_method?
+      $has_ship = false;
+      if ($rs = @$conexion->query("SHOW COLUMNS FROM sales LIKE 'shipping_method'")) {
+        $has_ship = ($rs->num_rows > 0);
+        @$rs->free();
+      }
+
+      // Traer la última venta en estado NEW
+      $cols = "id, customer_name, total, created_at".($has_ship ? ", shipping_method" : "");
+      $sql  = "SELECT $cols FROM sales WHERE status='new' ORDER BY created_at DESC LIMIT 1";
+
+      if ($rs = @$conexion->query($sql)) {
+        if ($row = $rs->fetch_assoc()) {
+          $ventaId = (int)$row['id'];
+          $nombre  = trim((string)$row['customer_name']);
+          if ($nombre==='') $nombre = 'Cliente';
+          $totalF  = number_format((float)($row['total'] ?? 0), 2, ',', '.');
+          $shipVal = $has_ship ? strtolower((string)$row['shipping_method']) : '';
+          // Texto según envío/retiro (si no hay columna, asumimos retiro)
+          $modoTxt = ($shipVal === 'envio') ? '🚚 con envío a domicilio' : '🏬 retiro en tienda';
+
+          $linkVentas = url_public('ventas.php');
+          // Render del banner
+          ?>
+          <div id="banner-online" style="margin:10px 14px 0;
+               background:#133321;border:1px solid #1f6f49;color:#c6f6d5;
+               padding:10px 12px;border-radius:10px;display:flex;align-items:center;gap:10px;">
+            <div>
+              🛎️ <b>Nueva compra #<?= (int)$ventaId ?></b>
+              — <?= htmlspecialchars($nombre, ENT_QUOTES, 'UTF-8') ?>
+              — <?= htmlspecialchars($modoTxt, ENT_QUOTES, 'UTF-8') ?>
+              — <b>$ <?= $totalF ?></b>
+            </div>
+            <div style="margin-left:auto;display:flex;gap:8px;">
+              <a href="<?= htmlspecialchars($linkVentas, ENT_QUOTES, 'UTF-8') ?>"
+                 class="cta" style="border:1px solid #1f6f49;color:inherit;text-decoration:none;padding:6px 10px;border-radius:8px;">
+                 Ver ventas
+              </a>
+              <button type="button" onclick="this.closest('#banner-online').remove()"
+                      style="background:transparent;color:inherit;border:0;cursor:pointer;font-weight:bold">✕</button>
+            </div>
+          </div>
+          <?php
+        }
+        @$rs->free();
+      }
+    }
+  }
+} catch (Throwable $e) { /* silencioso */ }
+?>
