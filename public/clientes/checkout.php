@@ -31,6 +31,163 @@ if (!function_exists('urlc')) {
   function urlc($path){ return url_public('clientes/'.ltrim((string)$path,'/')); }
 }
 
+/* ====== Funciones robustas para INSERT dinámico ====== */
+function db_has_table($table){
+  global $conexion;
+  $rs = @$conexion->query("SHOW TABLES LIKE '". $conexion->real_escape_string($table) ."'");
+  return ($rs && $rs->num_rows>0);
+}
+function db_cols($table){
+  global $conexion;
+  $cols = [];
+  if ($rs=@$conexion->query("SHOW COLUMNS FROM `$table`")) {
+    while($r=$rs->fetch_assoc()){ $cols[$r['Field']] = $r; }
+  }
+  return $cols;
+}
+function infer_type($v){
+  if (is_int($v)) return 'i';
+  if (is_float($v)) return 'd';
+  if (is_numeric($v)) return (str_contains((string)$v,'.')?'d':'i');
+  return 's';
+}
+/**
+ * Inserta en $table sólo las columnas que EXISTEN (soporta sinónimos).
+ * $data puede incluir muchas posibles columnas. Se intersecta con las reales.
+ * Devuelve insert_id.
+ */
+function insert_dynamic_row($table, array $data){
+  global $conexion;
+  $cols_info = db_cols($table);
+  if (!$cols_info) throw new Exception("La tabla `$table` no existe o no se pudo leer.");
+  $avail = array_fill_keys(array_keys($cols_info), true);
+
+  // filtrar data por columnas existentes
+  $filtered = [];
+  foreach ($data as $k=>$v) {
+    if (isset($avail[$k])) $filtered[$k] = $v;
+  }
+  if (!$filtered) throw new Exception("No hay columnas compatibles para `$table`.");
+
+  // armar SQL
+  $columns = array_keys($filtered);
+  $place   = array_fill(0, count($columns), '?');
+  $types   = '';
+  $params  = [];
+  foreach ($columns as $c){ $types .= infer_type($filtered[$c]); $params[] = $filtered[$c]; }
+
+  $sql = "INSERT INTO `$table` (`".implode("`,`",$columns)."`) VALUES (".implode(',',$place).")";
+  $stmt = $conexion->prepare($sql);
+  if (!$stmt) throw new Exception("SQL PREPARE ($table): ".$conexion->error." — ".$sql);
+  $stmt->bind_param($types, ...$params);
+  if (!$stmt->execute()){ $e=$stmt->error; $stmt->close(); throw new Exception("SQL EXEC ($table): $e — ".$sql); }
+  $id = $stmt->insert_id; $stmt->close();
+  return (int)$id;
+}
+
+/* Atajos de sinónimos para SALES y SALE_ITEMS */
+function sales_payload($args){
+  // $args: name, phone, email, method, cuotas, subtotal, fee, ship_method, ship_cost, addr, city, prov, post, notes, total
+  $now = date('Y-m-d H:i:s');
+  $p = [
+    // nombre/cliente
+    'customer_name' => $args['name'],
+    'name'          => $args['name'],
+    'cliente'       => $args['name'],
+    'buyer_name'    => $args['name'],
+    // telefono
+    'customer_phone'=> $args['phone'],
+    'phone'         => $args['phone'],
+    'telefono'      => $args['phone'],
+    // email
+    'customer_email'=> $args['email'],
+    'email'         => $args['email'],
+
+    // pago
+    'payment_method'=> $args['method'],
+    'method'        => $args['method'],
+    'metodo'        => $args['method'],
+    'installments'  => $args['cuotas'],
+    'cuotas'        => $args['cuotas'],
+
+    // totales (sin descuentos en tienda)
+    'subtotal'      => $args['subtotal'],
+    'total'         => $args['total'],
+    'discount'      => 0.0,
+    'descuento'     => 0.0,
+    'fee'           => $args['fee'],
+    'recargo'       => $args['fee'],
+
+    // envío
+    'shipping_method'  => $args['ship_method'],
+    'delivery_method'  => $args['ship_method'],
+    'tipo_envio'       => $args['ship_method'],
+
+    'shipping_cost'    => $args['ship_cost'],
+    'delivery_cost'    => $args['ship_cost'],
+    'costo_envio'      => $args['ship_cost'],
+
+    'shipping_address' => $args['addr'],
+    'address'          => $args['addr'],
+    'direccion'        => $args['addr'],
+
+    'shipping_city'    => $args['city'],
+    'city'             => $args['city'],
+    'ciudad'           => $args['city'],
+
+    'shipping_province'=> $args['prov'],
+    'province'         => $args['prov'],
+    'provincia'        => $args['prov'],
+
+    'shipping_postal'  => $args['post'],
+    'postal'           => $args['post'],
+    'cp'               => $args['post'],
+
+    'shipping_notes'   => $args['notes'],
+    'notes'            => $args['notes'],
+    'observaciones'    => $args['notes'],
+
+    // tracking
+    'status'        => 'new',
+    'estado'        => 'new',
+    'created_at'    => $now,
+    'fecha'         => $now,
+    'origin'        => 'online',
+    'origen'        => 'online',
+  ];
+  return $p;
+}
+function sale_item_payload($sale_id, $it){
+  return [
+    'sale_id'      => $sale_id,
+    'venta_id'     => $sale_id,
+
+    'product_id'   => (int)$it['pid'],
+    'producto_id'  => (int)$it['pid'],
+
+    'variant_id'   => (int)$it['vid'],
+    'product_variant_id' => (int)$it['vid'],
+    'variante_id'  => (int)$it['vid'],
+
+    'name'         => (string)$it['name'],
+    'title'        => (string)$it['name'],
+    'descripcion'  => (string)$it['name'],
+
+    'qty'          => (int)$it['qty'],
+    'quantity'     => (int)$it['qty'],
+    'cantidad'     => (int)$it['qty'],
+
+    'price_unit'   => (float)$it['price'],
+    'unit_price'   => (float)$it['price'],
+    'precio_unit'  => (float)$it['price'],
+    'price'        => (float)$it['price'],
+
+    'line_total'   => (float)$it['line_total'],
+    'total'        => (float)$it['line_total'],
+    'importe'      => (float)$it['line_total'],
+  ];
+}
+
 /* ===== Config pagos (SIN descuentos de tienda online) ===== */
 $PAY_METHODS = [
   'efectivo'         => ['label'=>'Efectivo'],
@@ -169,13 +326,13 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
       if (empty($errors)) {
         try {
-          // Crear tablas si no existen
+          // Crear tablas si no existen (por si la BD está vacía)
           @$conexion->query("CREATE TABLE IF NOT EXISTS sales (
             id INT AUTO_INCREMENT PRIMARY KEY,
             customer_name VARCHAR(120) NULL,
             customer_phone VARCHAR(60) NULL,
             customer_email VARCHAR(120) NULL,
-            payment_method VARCHAR(30) NOT NULL,
+            payment_method VARCHAR(30) NULL,
             installments INT NOT NULL DEFAULT 1,
             subtotal DECIMAL(12,2) NOT NULL DEFAULT 0,
             discount DECIMAL(12,2) NOT NULL DEFAULT 0,
@@ -189,6 +346,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             shipping_notes TEXT NULL,
             total DECIMAL(12,2) NOT NULL DEFAULT 0,
             status VARCHAR(20) NOT NULL DEFAULT 'new',
+            origin VARCHAR(20) NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
@@ -206,57 +364,30 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
           $conexion->begin_transaction();
 
-          // Insert extendido (con columnas de envío)
-          $sql = "INSERT INTO sales
-            (customer_name, customer_phone, customer_email, payment_method, installments, subtotal, discount, fee,
-             shipping_method, shipping_cost, shipping_address, shipping_city, shipping_province, shipping_postal, shipping_notes,
-             total, status)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'new')";
-          $stmt = $conexion->prepare($sql);
-          if (!$stmt) { throw new Exception("SQL PREPARE sales: ".$conexion->error." — ".$sql); }
-
-          // Tipos: s s s s i d d d s d s s s s s d  (16)
-          $types = "ssssidddsdsssssd";
+          // Armar payload tolerante al esquema real
           $addr  = (string)($shipping['address']??'');
           $city  = (string)($shipping['city']??'');
           $prov  = (string)($shipping['province']??'');
           $post  = (string)($shipping['postal']??'');
           $notes = (string)($shipping['notes']??'');
-          $shipm = (string)$ship_method;
 
-          $stmt->bind_param($types,
-            $name,$phone,$email,$method,$cuotas,$subtotal,$discount,$fee,
-            $shipm,$ship_cost,$addr,$city,$prov,$post,$notes,
-            $total
-          );
-          $stmt->execute();
-          $sale_id = (int)$stmt->insert_id;
-          $stmt->close();
+          $sale_payload = sales_payload([
+            'name'=>$name,'phone'=>$phone,'email'=>$email,
+            'method'=>$method,'cuotas'=>$cuotas,
+            'subtotal'=>$subtotal,'fee'=>$fee,
+            'ship_method'=>$ship_method,'ship_cost'=>$ship_cost,
+            'addr'=>$addr,'city'=>$city,'prov'=>$prov,'post'=>$post,'notes'=>$notes,
+            'total'=>$total
+          ]);
 
-          // Marcar origin='online' si existe la columna
-          if (($rso=@$conexion->query("SHOW COLUMNS FROM sales LIKE 'origin'")) && $rso->num_rows>0) {
-            if ($st2=$conexion->prepare("UPDATE sales SET origin='online' WHERE id=?")) {
-              $st2->bind_param('i', $sale_id);
-              $st2->execute();
-              $st2->close();
-            }
-          }
+          // Insert robusto en sales
+          $sale_id = insert_dynamic_row('sales', $sale_payload);
 
-          // Ítems
-          $sqlItems = "INSERT INTO sale_items
-            (sale_id, product_id, variant_id, name, qty, price_unit, line_total)
-            VALUES (?,?,?,?,?,?,?)";
-          $sti = $conexion->prepare($sqlItems);
-          if (!$sti) { throw new Exception("SQL PREPARE sale_items: ".$conexion->error." — ".$sqlItems); }
-
+          // Insert ítems (robusto)
           foreach ($items as $it) {
-            $sti->bind_param("iiisidd",
-              $sale_id, (int)$it['pid'], (int)$it['vid'], $it['name'],
-              (int)$it['qty'], (float)$it['price'], (float)$it['line_total']
-            );
-            $sti->execute();
+            $item_payload = sale_item_payload($sale_id, $it);
+            insert_dynamic_row('sale_items', $item_payload);
           }
-          $sti->close();
 
           $conexion->commit();
           $ok_sale_id = $sale_id;
@@ -266,55 +397,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
           $_SESSION['cart_count'] = 0;
 
         } catch (Throwable $e) {
-          // Fallback para schema antiguo (sin columnas de envío)
           @$conexion->rollback();
-          try {
-            $conexion->begin_transaction();
-
-            $sql = "INSERT INTO sales
-              (customer_name, customer_phone, customer_email, payment_method, installments, subtotal, discount, fee, total, status)
-              VALUES (?,?,?,?,?,?,?,?,?, 'new')";
-            $stmt = $conexion->prepare($sql);
-            if (!$stmt) { throw new Exception("SQL PREPARE sales (fallback): ".$conexion->error." — ".$sql); }
-            $stmt->bind_param("ssssidddd",
-              $name,$phone,$email,$method,$cuotas,$subtotal,$discount,$fee,$total
-            );
-            $stmt->execute();
-            $sale_id = (int)$stmt->insert_id;
-            $stmt->close();
-
-            // origin en fallback si existe
-            if (($rso=@$conexion->query("SHOW COLUMNS FROM sales LIKE 'origin'")) && $rso->num_rows>0) {
-              if ($st2=$conexion->prepare("UPDATE sales SET origin='online' WHERE id=?")) {
-                $st2->bind_param('i', $sale_id);
-                $st2->execute();
-                $st2->close();
-              }
-            }
-
-            $sqlItems = "INSERT INTO sale_items
-              (sale_id, product_id, variant_id, name, qty, price_unit, line_total)
-              VALUES (?,?,?,?,?,?,?)";
-            $sti = $conexion->prepare($sqlItems);
-            if (!$sti) { throw new Exception("SQL PREPARE sale_items (fallback): ".$conexion->error." — ".$sqlItems); }
-            foreach ($items as $it) {
-              $sti->bind_param("iiisidd",
-                $sale_id, (int)$it['pid'], (int)$it['vid'], $it['name'],
-                (int)$it['qty'], (float)$it['price'], (float)$it['line_total']
-              );
-              $sti->execute();
-            }
-            $sti->close();
-
-            $conexion->commit();
-            $ok_sale_id = $sale_id;
-
-            $_SESSION['cart'] = [];
-            $_SESSION['cart_count'] = 0;
-          } catch (Throwable $e2) {
-            @$conexion->rollback();
-            $errors[] = 'Error al guardar la venta: '.$e2->getMessage();
-          }
+          $errors[] = 'Error al guardar la venta: '.$e->getMessage();
         }
       }
     }
