@@ -70,7 +70,65 @@ function adjust_stock($product_id, $variant_id, $qty_change){
   }
 }
 
-/* ===== AJAX: buscar por SKU ===== */
+/* ===== Reservas (opcional) ===== */
+function reservations_table_exists(){ return t_exists('stock_reservations'); }
+function close_reservations_without_restock($sale_id){
+  global $conexion;
+  if (!reservations_table_exists()) return;
+  if ($st=$conexion->prepare("UPDATE stock_reservations SET released_at=NOW() WHERE sale_id=? AND released_at IS NULL")) {
+    $st->bind_param('i',$sale_id); $st->execute(); $st->close();
+  }
+}
+function restock_from_reservations($sale_id){
+  global $conexion;
+  if (!reservations_table_exists()) return false;
+  $sql="SELECT id,product_id,variant_id,qty FROM stock_reservations WHERE sale_id=? AND released_at IS NULL";
+  if ($st=$conexion->prepare($sql)) {
+    $st->bind_param('i',$sale_id);
+    $st->execute();
+    $rs=$st->get_result();
+    $found=false;
+    while($r=$rs->fetch_assoc()){
+      $found=true;
+      adjust_stock((int)$r['product_id'], (int)$r['variant_id'], + (int)$r['qty']);
+      if ($st2=$conexion->prepare("UPDATE stock_reservations SET released_at=NOW() WHERE id=?")) {
+        $id=(int)$r['id']; $st2->bind_param('i',$id); $st2->execute(); $st2->close();
+      }
+    }
+    $st->close();
+    return $found;
+  }
+  return false;
+}
+function restock_from_sale_items($sale_id){
+  global $conexion;
+  if (!t_exists('sale_items')) return false;
+  $st = $conexion->prepare("SELECT product_id,variant_id,qty FROM sale_items WHERE sale_id=?");
+  if (!$st) return false;
+  $st->bind_param('i',$sale_id); $st->execute(); $rs=$st->get_result();
+  $found=false;
+  while($r=$rs->fetch_assoc()){
+    $found=true;
+    adjust_stock((int)$r['product_id'], (int)$r['variant_id'], + (int)$r['qty']);
+  }
+  $st->close();
+  return $found;
+}
+
+/* ===== Setear estado de forma segura (por si status es ENUM distinto) ===== */
+function safe_update_status($sale_id, array $candidates){
+  global $conexion;
+  if (!hascol('sales','status')) return;
+  foreach ($candidates as $stVal){
+    if ($st = $conexion->prepare("UPDATE sales SET status=? WHERE id=?")) {
+      $st->bind_param('si',$stVal,$sale_id);
+      if ($st->execute()) { $st->close(); return; }
+      $st->close();
+    }
+  }
+}
+
+/* ===== AJAX: buscar por SKU (POS) ===== */
 if ($db_ok && (($_GET['__ajax'] ?? '')==='find_sku')) {
   header('Content-Type: application/json; charset=utf-8');
   try {
@@ -141,8 +199,51 @@ $PAY_METHODS = [
 ];
 $DISCOUNT_OPTIONS = [0,5,10,15,20,25];
 
-/* ===== Guardar venta ===== */
+/* ===== Acciones de gestión ONLINE (confirmar / cancelar) ===== */
 $okMsg=''; $errMsg='';
+if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST') {
+  $act = $_POST['__action'] ?? '';
+  if ($act==='mark_online_paid' || $act==='cancel_online') {
+    try{
+      $sale_id = max(0,(int)($_POST['sale_id'] ?? 0));
+      if ($sale_id<=0) throw new Exception('Venta inválida');
+
+      $conexion->begin_transaction();
+
+      if ($act==='mark_online_paid') {
+        // Confirmar: marcar como done/paid y cerrar reservas SIN devolver stock
+        if (hascol('sales','status')) {
+          safe_update_status($sale_id, ['done','paid','pagado','completed','completada']);
+        }
+        if (hascol('sales','paid_at')) {
+          if ($st=$conexion->prepare("UPDATE sales SET paid_at=NOW() WHERE id=?")) { $st->bind_param('i',$sale_id); $st->execute(); $st->close(); }
+        }
+        close_reservations_without_restock($sale_id);
+        $okMsg = "✅ Venta #$sale_id confirmada (pago ok).";
+
+      } elseif ($act==='cancel_online') {
+        // Cancelar: devolver stock y marcar cancelada
+        $done=false;
+        // Si hay reservas, restock desde reservas
+        $done = restock_from_reservations($sale_id);
+        // Si no hay reservas, restock desde los items de la venta
+        if (!$done) { restock_from_sale_items($sale_id); }
+
+        if (hascol('sales','status')) {
+          safe_update_status($sale_id, ['cancelled','canceled','anulada','rejected','rechazada','expired','expirada']);
+        }
+        $okMsg = "↩️ Venta #$sale_id cancelada y stock devuelto.";
+      }
+
+      $conexion->commit();
+    } catch(Throwable $e){
+      if ($conexion && $conexion instanceof mysqli) { @$conexion->rollback(); }
+      $errMsg = '❌ '.$e->getMessage();
+    }
+  }
+}
+
+/* ===== Guardar venta POS ===== */
 if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'] ?? '')==='create_sale')) {
   try {
     // Tablas mínimas
@@ -177,14 +278,11 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     }
 
-    // Datos del formulario
-    $sold_at      = trim((string)($_POST['sold_at'] ?? '')); // informativo
+    // Datos del formulario POS
     $customer     = trim((string)($_POST['customer'] ?? ''));
     $payment      = trim((string)($_POST['payment_method'] ?? 'efectivo'));
     if (!isset($PAY_METHODS[$payment])) $payment = 'efectivo';
     $installments = max(1, (int)($_POST['installments'] ?? 1));
-    $receipt      = trim((string)($_POST['receipt'] ?? '')); // no se guarda si la tabla no lo tiene
-    $notes        = trim((string)($_POST['notes'] ?? ''));   // idem
     $discount_pct = (int)($_POST['discount_pct'] ?? 0);
     if (!in_array($discount_pct,$DISCOUNT_OPTIONS,true)) $discount_pct = 0;
 
@@ -214,13 +312,29 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
           $st->execute();
           $res=$st->get_result();
           if ($r=$res->fetch_assoc()) {
-            $pid=(int)$r['pid']; $vid=(int)$r['vid']; $name=(string)$r['pname']; $price=(float)($r['vprice']??0);
+            $pid=(int)$r['id']; // cuidado: $r['id'] no existe, usamos pid/vid abajo
           }
           $st->close();
         }
       }
 
-      // Producto por SKU si no hay variante
+      // Reconsultar bien porque arriba no mapeamos
+      $pid=0; $vid=0; $name='Item'; $price=0.0;
+      if (t_exists('product_variants') && t_exists('products')) {
+        $sql = "SELECT v.id AS vid,v.price AS vprice,p.id AS pid,p.name AS pname
+                FROM product_variants v
+                JOIN products p ON p.id=v.product_id
+                WHERE v.sku=? LIMIT 1";
+        if ($st=$conexion->prepare($sql)) {
+          $st->bind_param('s',$sku);
+          $st->execute();
+          $res=$st->get_result();
+          if ($r=$res->fetch_assoc()) {
+            $pid=(int)$r['pid']; $vid=(int)$r['vid']; $name=(string)$r['pname']; $price=(float)($r['vprice']??0);
+          }
+          $st->close();
+        }
+      }
       if ($pid===0 && t_exists('products')) {
         $sql="SELECT id,name,price FROM products WHERE sku=? LIMIT 1";
         if ($st=$conexion->prepare($sql)) {
@@ -233,10 +347,7 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
           $st->close();
         }
       }
-
-      // Nombre fallback
       if ($pid===0) { $name = $sku; }
-      // Precio editable
       if ($priceIn > 0) $price = $priceIn;
 
       $line = $price * $qty;
@@ -246,12 +357,10 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
 
     if (!$items) { throw new Exception('Agregá al menos un ítem.'); }
 
-    // Totales
     $discount = round($subtotal * ($discount_pct/100), 2);
     $fee = 0.0;
     $total = max(0.0, $subtotal - $discount + $fee);
 
-    // Guardar
     $conexion->begin_transaction();
 
     $sql = "INSERT INTO sales (customer_name, customer_phone, customer_email, payment_method, installments, subtotal, discount, fee, total, status, origin)
@@ -272,26 +381,57 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
     foreach ($items as $it) {
       $sti->bind_param('iiisidd', $sale_id, (int)$it['pid'], (int)$it['vid'], $it['name'], (int)$it['qty'], (float)$it['price'], (float)$it['line_total']);
       $sti->execute();
-
-      // Descontar stock (variante o producto)
       adjust_stock((int)$it['pid'], (int)$it['vid'], - (int)$it['qty']);
     }
     $sti->close();
 
     $conexion->commit();
-    $okMsg = "✅ Venta #$sale_id guardada. Total $ ".money($total);
+    $okMsg = "✅ Venta POS #$sale_id guardada. Total $ ".money($total);
 
   } catch (Throwable $e) {
     if ($conexion && $conexion instanceof mysqli) { @$conexion->rollback(); }
     $errMsg = '❌ '.$e->getMessage();
   }
 }
+
+/* ===== Consultar PENDIENTES ONLINE para confirmar ===== */
+$pending = [];
+if ($db_ok && t_exists('sales')) {
+  $where = [];
+  // origen online o indicio de envío
+  if (hascol('sales','origin')) {
+    $where[] = "origin='online'";
+  } elseif (hascol('sales','shipping_method')) {
+    $where[] = "(shipping_method IS NOT NULL AND shipping_method<>'')";
+  } else {
+    $where[] = "1=1";
+  }
+
+  // estados pendientes
+  if (hascol('sales','status')) {
+    $where[] = "(status IS NULL OR status='' OR status IN ('new','pending','pendiente','unpaid','sin_pago','por_confirmar','created'))";
+  } elseif (hascol('sales','created_at')) {
+    $where[] = "created_at >= NOW() - INTERVAL 2 DAY";
+  }
+
+  $order = hascol('sales','created_at') ? "ORDER BY created_at DESC" : "ORDER BY id DESC";
+  $sql   = "SELECT * FROM sales WHERE ".implode(' AND ',$where)." $order LIMIT 50";
+  if ($rs=@$conexion->query($sql)) {
+    while($r=$rs->fetch_assoc()) $pending[]=$r;
+  }
+}
+
+/* ===== Helpers de lectura flexible de fila sales ===== */
+function row_get($row, $keys, $default=''){
+  foreach ($keys as $k) if (array_key_exists($k,$row) && $row[$k]!==null && $row[$k]!=='') return $row[$k];
+  return $default;
+}
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Luna — Ventas (POS)</title>
+  <title>Luna — Ventas</title>
   <link rel="stylesheet" href="<?=url('assets/css/styles.css')?>">
   <link rel="icon" type="image/png" href="<?=url('assets/img/logo.png')?>">
   <style>
@@ -307,19 +447,85 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
     .ok{background:#1b2a1d;border:1px solid #14532d;color:#bbf7d0;border-radius:8px;padding:10px;margin:10px 0}
     .card{background:var(--card,#12141a);border:1px solid var(--ring,#2d323d);border-radius:12px;padding:12px}
     .container{max-width:1100px;margin:0 auto;padding:0 14px}
+    .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--ring,#2d323d);border-radius:999px}
   </style>
 </head>
 <body>
 
 <?php if (file_exists($root.'/includes/header.php')) require $root.'/includes/header.php'; ?>
 
-<?php page_head('Ventas (Local)', 'Registra ventas en el local con descuento opcional.'); ?>
+<?php page_head('Ventas', 'Confirma pagos online y registra ventas en el local.'); ?>
 
 <main class="container">
+
   <?php if($okMsg): ?><div class="ok"><?=h($okMsg)?></div><?php endif; ?>
   <?php if($errMsg): ?><div class="alert"><?=h($errMsg)?></div><?php endif; ?>
 
-  <h2>➕ Nueva venta</h2>
+  <!-- ====== Pendientes Online ====== -->
+  <section class="card" style="margin-bottom:16px">
+    <h2 style="margin-top:0">🛒 Pendientes online para confirmar</h2>
+    <?php if (!$db_ok): ?>
+      <div class="alert">No hay conexión a la base de datos.</div>
+    <?php elseif (!t_exists('sales')): ?>
+      <div>No hay tabla <code>sales</code> aún.</div>
+    <?php elseif (!$pending): ?>
+      <div class="pill">Sin pendientes online.</div>
+    <?php else: ?>
+      <div style="overflow:auto">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Fecha</th>
+              <th>Cliente</th>
+              <th>Pago</th>
+              <th>Tipo</th>
+              <th>Total</th>
+              <th>Estado</th>
+              <th style="width:240px">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach($pending as $s): ?>
+              <?php
+                $sid   = (int)($s['id'] ?? 0);
+                $fecha = h(row_get($s,['created_at','fecha'],''));
+                $cli   = h(row_get($s,['customer_name','name','buyer_name','cliente'],'(sin nombre)'));
+                $pay   = h(row_get($s,['payment_method','method','metodo'],''));
+                $ship  = h(row_get($s,['shipping_method','delivery_method','tipo_envio'],''));
+                $total = (float)row_get($s,['total'],0);
+                $status= h(row_get($s,['status','estado'],''));
+              ?>
+              <tr>
+                <td>#<?= $sid ?></td>
+                <td><?= $fecha ?></td>
+                <td><?= $cli ?></td>
+                <td><?= $pay ?></td>
+                <td><?= $ship?:'—' ?></td>
+                <td>$ <?= money($total) ?></td>
+                <td><?= $status?:'pendiente' ?></td>
+                <td>
+                  <form method="post" style="display:inline">
+                    <input type="hidden" name="__action" value="mark_online_paid">
+                    <input type="hidden" name="sale_id" value="<?= $sid ?>">
+                    <button class="btn">✅ Confirmar pago</button>
+                  </form>
+                  <form method="post" style="display:inline" onsubmit="return confirm('¿Cancelar esta venta y devolver stock?');">
+                    <input type="hidden" name="__action" value="cancel_online">
+                    <input type="hidden" name="sale_id" value="<?= $sid ?>">
+                    <button class="btn">↩️ Cancelar y devolver stock</button>
+                  </form>
+                </td>
+              </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
+    <?php endif; ?>
+  </section>
+
+  <!-- ====== POS / Venta en local ====== -->
+  <h2>➕ Nueva venta (Local)</h2>
   <form class="card" method="post">
     <input type="hidden" name="__action" value="create_sale">
 
