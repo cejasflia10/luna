@@ -71,7 +71,6 @@ function infer_type($v){
   if (is_numeric($v)) return (str_contains((string)$v,'.')?'d':'i');
   return 's';
 }
-/** Inserta en $table sólo columnas que existan (tolerante a esquemas distintos) */
 function insert_dynamic_row($table, array $data){
   global $conexion;
   $cols_info = db_cols($table);
@@ -158,7 +157,6 @@ function choose_status_value($method, $table, $col){
 }
 
 /* ===== Manejo de STOCK y visibilidad ===== */
-// Stock total del producto (suma variantes o lee products.stock)
 function product_total_stock($product_id){
   global $conexion;
   $product_id=(int)$product_id;
@@ -184,8 +182,6 @@ function product_total_stock($product_id){
   }
   return $sum;
 }
-
-// Activa/Desactiva (o borra) el producto según stock total
 function set_product_active_by_stock($product_id){
   global $conexion;
   $product_id=(int)$product_id;
@@ -194,7 +190,6 @@ function set_product_active_by_stock($product_id){
   $stock = product_total_stock($product_id);
   $on = ($stock > 0) ? 1 : 0;
 
-  // columnas booleanas típicas
   foreach (['active','is_active','enabled','available','visible'] as $col) {
     if (hascol('products',$col)) {
       if ($st=$conexion->prepare("UPDATE products SET `$col`=? WHERE id=?")) {
@@ -207,7 +202,6 @@ function set_product_active_by_stock($product_id){
     }
   }
 
-  // si hay status ENUM
   if (hascol('products','status')) {
     $type = coltype('products','status');
     if ($type && strpos($type,'enum(')===0) {
@@ -227,18 +221,14 @@ function set_product_active_by_stock($product_id){
     }
   }
 
-  // fallback: borrar si no hay forma de ocultar y está en 0
   if (!$on && DELETE_PRODUCT_WHEN_OUT_OF_STOCK) {
     @$conexion->query("DELETE FROM products WHERE id=".$product_id." LIMIT 1");
   }
 }
-
-// Descuenta/repone stock y actualiza visibilidad del producto
 function adjust_stock($product_id, $variant_id, $qty_change){
   global $conexion;
   $product_id=(int)$product_id; $variant_id=(int)$variant_id; $qty_change=(int)$qty_change;
 
-  // variantes
   if (db_has_table('product_variants') && $variant_id>0) {
     $col = hascol('product_variants','stock') ? 'stock' : (hascol('product_variants','existencia') ? 'existencia' : null);
     if ($col) {
@@ -248,7 +238,6 @@ function adjust_stock($product_id, $variant_id, $qty_change){
       }
     }
   }
-  // producto
   if (db_has_table('products')) {
     $colp = hascol('products','stock') ? 'stock' : (hascol('products','existencia') ? 'existencia' : null);
     if ($colp) {
@@ -258,8 +247,6 @@ function adjust_stock($product_id, $variant_id, $qty_change){
       }
     }
   }
-
-  // actualizar visibilidad/eliminación según stock total
   set_product_active_by_stock($product_id);
 }
 
@@ -290,13 +277,10 @@ function release_expired_reservations(){
           AND (s.id IS NULL OR s.status IS NULL OR s.status NOT IN ('paid','pagado','completed','completada'))";
   if ($rs=@$conexion->query($sql)) {
     while($r=$rs->fetch_assoc()){
-      // reponer stock
       adjust_stock((int)$r['product_id'], (int)$r['variant_id'], + (int)$r['qty']);
-      // cerrar reserva
       if ($st=$conexion->prepare("UPDATE stock_reservations SET released_at=NOW() WHERE id=?")) {
         $st->bind_param('i',$r['id']); $st->execute(); $st->close();
       }
-      // marcar venta como expirada respetando tipo de columna
       if (hascol('sales','status') && (int)$r['sale_id']>0) {
         $stype = coltype('sales','status');
         if (preg_match('~^(tinyint|smallint|int|bigint|decimal|double|float)~',$stype)) {
@@ -378,6 +362,18 @@ $errors = []; $ok_sale_id = 0;
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
   $action = $_POST['action'] ?? '';
 
+  /* NUEVO: guardar método de pago */
+  if ($action === 'set_payment') {
+    $m = $_POST['pay_method'] ?? 'efectivo';
+    if (!isset($PAY_METHODS[$m])) $m = 'efectivo';
+    $payment['method'] = $m;
+
+    $inst = (int)($_POST['installments'] ?? 1);
+    $payment['installments'] = ($m==='credito') ? max(1,$inst) : 1;
+
+    header('Location: '.urlc('checkout.php')); exit;
+  }
+
   if ($action === 'set_shipping') {
     $m = $_POST['ship_method'] ?? 'retiro';
     if (!isset($SHIPPING[$m])) $m = 'retiro';
@@ -432,7 +428,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         $items[]=['pid'=>$pid,'vid'=>$vid,'name'=>$nameP,'qty'=>$qty,'price'=>$price,'line_total'=>$lt];
       }
 
-      // Pago
+      // Pago (usa lo que guardamos en sesión)
       $method   = $payment['method'] ?? 'efectivo';
       $cuotas   = (int)($payment['installments'] ?? 1);
       $discount = 0.0;
@@ -498,7 +494,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
           $conexion->begin_transaction();
 
-          // Insert venta (tolerante) + STATUS compatible con el esquema
           $addr=(string)($shipping['address']??''); $city=(string)($shipping['city']??'');
           $prov=(string)($shipping['province']??''); $post=(string)($shipping['postal']??''); $notes=(string)($shipping['notes']??'');
 
@@ -520,14 +515,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
           $sale_id = insert_dynamic_row('sales', $sale_payload);
 
-          // Ítems + stock + reserva si corresponde
           foreach ($items as $it) {
             insert_dynamic_row('sale_items', sale_item_payload($sale_id,$it));
-
-            // Descontar stock y actualizar visibilidad
             adjust_stock((int)$it['pid'], (int)$it['vid'], - (int)$it['qty']);
-
-            // Reservar 24h para métodos no pago
             if (in_array($method,$UNPAID_METHODS,true) && db_has_table('stock_reservations')) {
               if ($st=$conexion->prepare("INSERT INTO stock_reservations (sale_id,product_id,variant_id,qty,expires_at) VALUES (?,?,?,?, DATE_ADD(NOW(), INTERVAL 1 DAY))")) {
                 $pid=(int)$it['pid']; $vid=(int)$it['vid']; $q=(int)$it['qty'];
@@ -539,11 +529,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
           $conexion->commit();
           $ok_sale_id = $sale_id;
 
-          // Vaciar carrito
           $_SESSION['cart'] = [];
           $_SESSION['cart_count'] = 0;
 
-          // Aviso y redirección al inicio (para ver el flash y el contador)
           $_SESSION['flash_ok'] = "🛒 Pedido #{$ok_sale_id} generado. Podés confirmarlo en Ventas.";
           header('Location: '.url_public('index.php'));
           exit;
@@ -697,13 +685,41 @@ $cart_empty = empty($items);
             <?php endif; ?>
             <div style="margin-top:8px;opacity:.9">
               Pago: <b><?= h($PAY_METHODS[$method]['label'] ?? $method) ?></b><?php if ($method==='credito'): ?> — <?= (int)$cuotas ?> cuotas<?php endif; ?>
-              <a class="cta" href="<?= urlc('carrito.php') ?>" style="margin-left:8px">Cambiar</a>
+              <!-- Link "Cambiar" ya no es necesario, el formulario está a la derecha -->
             </div>
           </div>
         </div>
 
-        <!-- Envío + Datos del cliente -->
+        <!-- Pago + Envío + Datos del cliente -->
         <div class="card">
+          <!-- NUEVO: Pago -->
+          <h3 style="margin-top:0">💳 Pago</h3>
+          <form method="post" action="<?= urlc('checkout.php') ?>" id="formPay">
+            <input type="hidden" name="action" value="set_payment">
+
+            <?php foreach ($PAY_METHODS as $k=>$cfg): ?>
+              <label>
+                <input type="radio" name="pay_method" value="<?= h($k) ?>" <?= ($method===$k?'checked':'') ?>>
+                <?= h($cfg['label']) ?>
+              </label>
+            <?php endforeach; ?>
+
+            <div id="cuotasBox" style="margin-top:8px;<?= $method==='credito' ? '' : 'display:none' ?>">
+              <label for="installments">Cuotas</label>
+              <select id="installments" name="installments">
+                <?php foreach (($PAY_METHODS['credito']['installments'] ?? [1=>0]) as $n=>$rec): ?>
+                  <option value="<?= (int)$n ?>" <?= ($cuotas===$n?'selected':'') ?>><?= (int)$n ?> <?= $n==1?'(sin interés)':'(rec. '.$rec.'%)' ?></option>
+                <?php endforeach; ?>
+              </select>
+            </div>
+
+            <div style="text-align:right;margin-top:8px">
+              <button type="submit" class="cta">Guardar pago</button>
+            </div>
+          </form>
+
+          <hr style="border:0;border-top:1px solid var(--ring,#2d323d);margin:14px 0">
+
           <h3 style="margin-top:0">🚚 Envío</h3>
           <form method="post" action="<?= urlc('checkout.php') ?>">
             <input type="hidden" name="action" value="set_shipping">
@@ -732,7 +748,9 @@ $cart_empty = empty($items);
             </div>
           </form>
 
-          <h3 style="margin-top:16px">👤 Tus datos</h3>
+          <hr style="border:0;border-top:1px solid var(--ring,#2d323d);margin:14px 0">
+
+          <h3 style="margin-top:0">👤 Tus datos</h3>
           <form method="post" action="<?= urlc('checkout.php') ?>">
             <input type="hidden" name="action" value="confirm">
             <label for="customer_name">Nombre y apellido</label>
@@ -765,6 +783,18 @@ $cart_empty = empty($items);
       }
       radios.forEach(r => r.addEventListener('change', sync));
       sync();
+    })();
+
+    // NUEVO: mostrar cuotas sólo si es crédito
+    (function(){
+      const payRadios = document.querySelectorAll('input[name="pay_method"]');
+      const cuotasBox = document.getElementById('cuotasBox');
+      function toggleCuotas(){
+        const sel = document.querySelector('input[name="pay_method"]:checked');
+        cuotasBox.style.display = (sel && sel.value==='credito') ? '' : 'none';
+      }
+      payRadios.forEach(r => r.addEventListener('change', toggleCuotas));
+      toggleCuotas();
     })();
   </script>
 
