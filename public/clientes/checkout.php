@@ -31,7 +31,7 @@ if (!function_exists('urlc')) {
   function urlc($path){ return url_public('clientes/'.ltrim((string)$path,'/')); }
 }
 
-/* ====== Funciones robustas para INSERT dinámico ====== */
+/* ========= Utilidades de BD ========= */
 function db_has_table($table){
   global $conexion;
   $rs = @$conexion->query("SHOW TABLES LIKE '". $conexion->real_escape_string($table) ."'");
@@ -45,36 +45,32 @@ function db_cols($table){
   }
   return $cols;
 }
+function hascol($table,$col){
+  global $conexion;
+  $rs = @$conexion->query("SHOW COLUMNS FROM `$table` LIKE '".$conexion->real_escape_string($col)."'");
+  return ($rs && $rs->num_rows>0);
+}
 function infer_type($v){
   if (is_int($v)) return 'i';
   if (is_float($v)) return 'd';
   if (is_numeric($v)) return (str_contains((string)$v,'.')?'d':'i');
   return 's';
 }
-/**
- * Inserta en $table sólo las columnas que EXISTEN (soporta sinónimos).
- * $data puede incluir muchas posibles columnas. Se intersecta con las reales.
- * Devuelve insert_id.
- */
+/** Inserta en $table sólo columnas que existan (tolerante a esquemas distintos) */
 function insert_dynamic_row($table, array $data){
   global $conexion;
   $cols_info = db_cols($table);
   if (!$cols_info) throw new Exception("La tabla `$table` no existe o no se pudo leer.");
   $avail = array_fill_keys(array_keys($cols_info), true);
 
-  // filtrar data por columnas existentes
   $filtered = [];
-  foreach ($data as $k=>$v) {
-    if (isset($avail[$k])) $filtered[$k] = $v;
-  }
+  foreach ($data as $k=>$v) if (isset($avail[$k])) $filtered[$k] = $v;
   if (!$filtered) throw new Exception("No hay columnas compatibles para `$table`.");
 
-  // armar SQL
   $columns = array_keys($filtered);
   $place   = array_fill(0, count($columns), '?');
-  $types   = '';
-  $params  = [];
-  foreach ($columns as $c){ $types .= infer_type($filtered[$c]); $params[] = $filtered[$c]; }
+  $types=''; $params=[];
+  foreach ($columns as $c){ $types .= infer_type($filtered[$c]); $params[]=$filtered[$c]; }
 
   $sql = "INSERT INTO `$table` (`".implode("`,`",$columns)."`) VALUES (".implode(',',$place).")";
   $stmt = $conexion->prepare($sql);
@@ -85,107 +81,110 @@ function insert_dynamic_row($table, array $data){
   return (int)$id;
 }
 
-/* Atajos de sinónimos para SALES y SALE_ITEMS */
+/* ====== Payloads tolerantes (sinónimos) ====== */
 function sales_payload($args){
-  // $args: name, phone, email, method, cuotas, subtotal, fee, ship_method, ship_cost, addr, city, prov, post, notes, total
   $now = date('Y-m-d H:i:s');
-  $p = [
-    // nombre/cliente
-    'customer_name' => $args['name'],
-    'name'          => $args['name'],
-    'cliente'       => $args['name'],
-    'buyer_name'    => $args['name'],
-    // telefono
-    'customer_phone'=> $args['phone'],
-    'phone'         => $args['phone'],
-    'telefono'      => $args['phone'],
-    // email
-    'customer_email'=> $args['email'],
-    'email'         => $args['email'],
-
+  return [
+    // cliente
+    'customer_name'=>$args['name'],'name'=>$args['name'],'cliente'=>$args['name'],'buyer_name'=>$args['name'],
+    'customer_phone'=>$args['phone'],'phone'=>$args['phone'],'telefono'=>$args['phone'],
+    'customer_email'=>$args['email'],'email'=>$args['email'],
     // pago
-    'payment_method'=> $args['method'],
-    'method'        => $args['method'],
-    'metodo'        => $args['method'],
-    'installments'  => $args['cuotas'],
-    'cuotas'        => $args['cuotas'],
-
-    // totales (sin descuentos en tienda)
-    'subtotal'      => $args['subtotal'],
-    'total'         => $args['total'],
-    'discount'      => 0.0,
-    'descuento'     => 0.0,
-    'fee'           => $args['fee'],
-    'recargo'       => $args['fee'],
-
+    'payment_method'=>$args['method'],'method'=>$args['method'],'metodo'=>$args['method'],
+    'installments'=>$args['cuotas'],'cuotas'=>$args['cuotas'],
+    // totales
+    'subtotal'=>$args['subtotal'],'total'=>$args['total'],
+    'discount'=>0.0,'descuento'=>0.0,'fee'=>$args['fee'],'recargo'=>$args['fee'],
     // envío
-    'shipping_method'  => $args['ship_method'],
-    'delivery_method'  => $args['ship_method'],
-    'tipo_envio'       => $args['ship_method'],
-
-    'shipping_cost'    => $args['ship_cost'],
-    'delivery_cost'    => $args['ship_cost'],
-    'costo_envio'      => $args['ship_cost'],
-
-    'shipping_address' => $args['addr'],
-    'address'          => $args['addr'],
-    'direccion'        => $args['addr'],
-
-    'shipping_city'    => $args['city'],
-    'city'             => $args['city'],
-    'ciudad'           => $args['city'],
-
-    'shipping_province'=> $args['prov'],
-    'province'         => $args['prov'],
-    'provincia'        => $args['prov'],
-
-    'shipping_postal'  => $args['post'],
-    'postal'           => $args['post'],
-    'cp'               => $args['post'],
-
-    'shipping_notes'   => $args['notes'],
-    'notes'            => $args['notes'],
-    'observaciones'    => $args['notes'],
-
+    'shipping_method'=>$args['ship_method'],'delivery_method'=>$args['ship_method'],'tipo_envio'=>$args['ship_method'],
+    'shipping_cost'=>$args['ship_cost'],'delivery_cost'=>$args['ship_cost'],'costo_envio'=>$args['ship_cost'],
+    'shipping_address'=>$args['addr'],'address'=>$args['addr'],'direccion'=>$args['addr'],
+    'shipping_city'=>$args['city'],'city'=>$args['city'],'ciudad'=>$args['city'],
+    'shipping_province'=>$args['prov'],'province'=>$args['prov'],'provincia'=>$args['prov'],
+    'shipping_postal'=>$args['post'],'postal'=>$args['post'],'cp'=>$args['post'],
+    'shipping_notes'=>$args['notes'],'notes'=>$args['notes'],'observaciones'=>$args['notes'],
     // tracking
-    'status'        => 'new',
-    'estado'        => 'new',
-    'created_at'    => $now,
-    'fecha'         => $now,
-    'origin'        => 'online',
-    'origen'        => 'online',
+    'status'=>'new','estado'=>'new',
+    'origin'=>'online','origen'=>'online',
+    'created_at'=>$now,'fecha'=>$now,
   ];
-  return $p;
 }
 function sale_item_payload($sale_id, $it){
   return [
-    'sale_id'      => $sale_id,
-    'venta_id'     => $sale_id,
-
-    'product_id'   => (int)$it['pid'],
-    'producto_id'  => (int)$it['pid'],
-
-    'variant_id'   => (int)$it['vid'],
-    'product_variant_id' => (int)$it['vid'],
-    'variante_id'  => (int)$it['vid'],
-
-    'name'         => (string)$it['name'],
-    'title'        => (string)$it['name'],
-    'descripcion'  => (string)$it['name'],
-
-    'qty'          => (int)$it['qty'],
-    'quantity'     => (int)$it['qty'],
-    'cantidad'     => (int)$it['qty'],
-
-    'price_unit'   => (float)$it['price'],
-    'unit_price'   => (float)$it['price'],
-    'precio_unit'  => (float)$it['price'],
-    'price'        => (float)$it['price'],
-
-    'line_total'   => (float)$it['line_total'],
-    'total'        => (float)$it['line_total'],
-    'importe'      => (float)$it['line_total'],
+    'sale_id'=>$sale_id,'venta_id'=>$sale_id,
+    'product_id'=>(int)$it['pid'],'producto_id'=>(int)$it['pid'],
+    'variant_id'=>(int)$it['vid'],'product_variant_id'=>(int)$it['vid'],'variante_id'=>(int)$it['vid'],
+    'name'=>(string)$it['name'],'title'=>(string)$it['name'],'descripcion'=>(string)$it['name'],
+    'qty'=>(int)$it['qty'],'quantity'=>(int)$it['qty'],'cantidad'=>(int)$it['qty'],
+    'price_unit'=>(float)$it['price'],'unit_price'=>(float)$it['price'],'precio_unit'=>(float)$it['price'],'price'=>(float)$it['price'],
+    'line_total'=>(float)$it['line_total'],'total'=>(float)$it['line_total'],'importe'=>(float)$it['line_total'],
   ];
+}
+
+/* ===== Manejo de STOCK y Reservas ===== */
+function adjust_stock($product_id, $variant_id, $qty_change){
+  global $conexion;
+  $product_id=(int)$product_id; $variant_id=(int)$variant_id; $qty_change=(int)$qty_change;
+
+  // Primero variantes
+  if (db_has_table('product_variants') && $variant_id>0) {
+    $col = hascol('product_variants','stock') ? 'stock' : (hascol('product_variants','existencia') ? 'existencia' : null);
+    if ($col) {
+      if ($st=$conexion->prepare("UPDATE product_variants SET `$col`=GREATEST(0, `$col`+?) WHERE id=? AND product_id=?")) {
+        $st->bind_param('iii',$qty_change,$variant_id,$product_id);
+        $st->execute(); $st->close(); return;
+      }
+    }
+  }
+  // Si no, en products
+  if (db_has_table('products')) {
+    $colp = hascol('products','stock') ? 'stock' : (hascol('products','existencia') ? 'existencia' : null);
+    if ($colp) {
+      if ($st=$conexion->prepare("UPDATE products SET `$colp`=GREATEST(0, `$colp`+?) WHERE id=?")) {
+        $st->bind_param('ii',$qty_change,$product_id);
+        $st->execute(); $st->close();
+      }
+    }
+  }
+}
+function ensure_reservations_table(){
+  global $conexion;
+  @$conexion->query("CREATE TABLE IF NOT EXISTS stock_reservations (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    sale_id INT NULL,
+    product_id INT NOT NULL,
+    variant_id INT NOT NULL DEFAULT 0,
+    qty INT NOT NULL,
+    expires_at DATETIME NOT NULL,
+    released_at DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX(product_id,variant_id), INDEX(expires_at),
+    FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+}
+function release_expired_reservations(){
+  global $conexion;
+  if (!db_has_table('stock_reservations')) return;
+
+  $sql="SELECT r.id,r.sale_id,r.product_id,r.variant_id,r.qty
+        FROM stock_reservations r
+        LEFT JOIN sales s ON s.id=r.sale_id
+        WHERE r.released_at IS NULL
+          AND r.expires_at<NOW()
+          AND (s.id IS NULL OR s.status IS NULL OR s.status NOT IN ('paid','pagado','completed','completada'))";
+  if ($rs=@$conexion->query($sql)) {
+    while($r=$rs->fetch_assoc()){
+      adjust_stock((int)$r['product_id'], (int)$r['variant_id'], + (int)$r['qty']);
+      if ($st=$conexion->prepare("UPDATE stock_reservations SET released_at=NOW() WHERE id=?")) {
+        $st->bind_param('i',$r['id']); $st->execute(); $st->close();
+      }
+      if (hascol('sales','status') && (int)$r['sale_id']>0) {
+        if ($st=$conexion->prepare("UPDATE sales SET status=IF(status IN ('paid','pagado','completed','completada'),status,'expired') WHERE id=?")) {
+          $st->bind_param('i',$r['sale_id']); $st->execute(); $st->close();
+        }
+      }
+    }
+  }
 }
 
 /* ===== Config pagos (SIN descuentos de tienda online) ===== */
@@ -197,6 +196,7 @@ $PAY_METHODS = [
   'credito'          => ['label'=>'Crédito', 'installments'=>[1=>0, 3=>10, 6=>20, 12=>35]],
   'cuenta_corriente' => ['label'=>'Cuenta Corriente'],
 ];
+$UNPAID_METHODS = ['efectivo','transferencia','cuenta_corriente'];
 
 /* ===== Config envío ===== */
 $SHIPPING = [
@@ -219,6 +219,9 @@ if ($has_conn && isset($conexion) && $conexion instanceof mysqli && !$conexion->
     $has_variant_price = (@$conexion->query("SHOW COLUMNS FROM product_variants LIKE 'price'")?->num_rows ?? 0) > 0;
   }
 }
+
+/* ===== Limpieza de reservas vencidas (cada visita) ===== */
+if ($db_ok) { ensure_reservations_table(); release_expired_reservations(); }
 
 /* ===== Carrito & pago & envío (sesión) ===== */
 if (!isset($_SESSION['cart']) || !is_array($_SESSION['cart'])) $_SESSION['cart'] = [];
@@ -316,7 +319,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         $flat = (float)($ship_cfg['flat']??0);
         $free = (float)($ship_cfg['free_over']??0);
         $ship_cost = ($free>0 && $subtotal>=$free) ? 0.0 : $flat;
-        // Validar dirección mínima
         if (($shipping['address']??'')==='') $errors[]='Ingresá la dirección para el envío.';
         if (($shipping['city']??'')==='')    $errors[]='Ingresá la ciudad.';
         if (($shipping['province']??'')==='')$errors[]='Ingresá la provincia.';
@@ -362,15 +364,13 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE
           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
+          ensure_reservations_table();
+
           $conexion->begin_transaction();
 
-          // Armar payload tolerante al esquema real
-          $addr  = (string)($shipping['address']??'');
-          $city  = (string)($shipping['city']??'');
-          $prov  = (string)($shipping['province']??'');
-          $post  = (string)($shipping['postal']??'');
-          $notes = (string)($shipping['notes']??'');
-
+          // Insert venta (tolerante)
+          $addr=(string)($shipping['address']??''); $city=(string)($shipping['city']??'');
+          $prov=(string)($shipping['province']??''); $post=(string)($shipping['postal']??''); $notes=(string)($shipping['notes']??'');
           $sale_payload = sales_payload([
             'name'=>$name,'phone'=>$phone,'email'=>$email,
             'method'=>$method,'cuotas'=>$cuotas,
@@ -379,14 +379,22 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             'addr'=>$addr,'city'=>$city,'prov'=>$prov,'post'=>$post,'notes'=>$notes,
             'total'=>$total
           ]);
-
-          // Insert robusto en sales
           $sale_id = insert_dynamic_row('sales', $sale_payload);
 
-          // Insert ítems (robusto)
+          // Ítems + stock + reserva si corresponde
           foreach ($items as $it) {
-            $item_payload = sale_item_payload($sale_id, $it);
-            insert_dynamic_row('sale_items', $item_payload);
+            insert_dynamic_row('sale_items', sale_item_payload($sale_id,$it));
+
+            // Descontar stock
+            adjust_stock((int)$it['pid'], (int)$it['vid'], - (int)$it['qty']);
+
+            // Reservar 24h para métodos no pago
+            if (in_array($method,$UNPAID_METHODS,true) && db_has_table('stock_reservations')) {
+              if ($st=$conexion->prepare("INSERT INTO stock_reservations (sale_id,product_id,variant_id,qty,expires_at) VALUES (?,?,?,?, DATE_ADD(NOW(), INTERVAL 1 DAY))")) {
+                $pid=(int)$it['pid']; $vid=(int)$it['vid']; $q=(int)$it['qty'];
+                $st->bind_param('iiii',$sale_id,$pid,$vid,$q); $st->execute(); $st->close();
+              }
+            }
           }
 
           $conexion->commit();
@@ -438,7 +446,7 @@ foreach ($cart as $k => $it) {
 /* ===== Totales (SIN descuentos) ===== */
 $method   = $payment['method'] ?? 'efectivo';
 $cuotas   = (int)($payment['installments'] ?? 1);
-$discount = 0.0; // no se aplican descuentos en la tienda
+$discount = 0.0;
 $fee      = 0.0;
 if ($method==='credito' && !empty($PAY_METHODS['credito']['installments'][$cuotas])) {
   $fee = $subtotal * ($PAY_METHODS['credito']['installments'][$cuotas]/100);
@@ -452,7 +460,7 @@ if ($ship_method==='envio') {
   $free=(float)($ship_cfg['free_over']??0);
   $ship_cost = ($free>0 && $subtotal>=$free) ? 0.0 : $flat;
 }
-$total = max(0.0, $subtotal + $fee + $ship_cost); // sin descuento
+$total = max(0.0, $subtotal + $fee + $ship_cost);
 $cuota_monto = ($method==='credito' && $cuotas>1) ? ($total/$cuotas) : 0.0;
 
 $header_path = $root.'/includes/header.php';
