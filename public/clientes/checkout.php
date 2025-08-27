@@ -20,8 +20,14 @@ if ($has_conn) { require $root.'/includes/conn.php'; }
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
 /* Polyfills por si PHP < 8 */
-if (!function_exists('str_contains'))      { function str_contains($h,$n){ return $n!=='' && mb_strpos($h,$n)!==false; } }
-if (!function_exists('str_starts_with'))   { function str_starts_with($h,$n){ return mb_substr($h,0,mb_strlen($n))===$n; } }
+if (!function_exists('str_contains'))    { function str_contains($h,$n){ return $n!=='' && mb_strpos($h,$n)!==false; } }
+if (!function_exists('str_starts_with')) { function str_starts_with($h,$n){ return mb_substr($h,0,mb_strlen($n))===$n; } }
+
+/* ===== Config de eliminación al quedar sin stock =====
+   Cambiá a true si querés BORRAR el producto cuando el stock total llegue a 0 */
+if (!defined('DELETE_PRODUCT_WHEN_OUT_OF_STOCK')) {
+  define('DELETE_PRODUCT_WHEN_OUT_OF_STOCK', false);
+}
 
 /* ===== BASES WEB (sin duplicar /clientes) ===== */
 $script = $_SERVER['SCRIPT_NAME'] ?? '';
@@ -37,19 +43,21 @@ if (!function_exists('urlc')) {
 /* ========= Utilidades de BD ========= */
 function db_has_table($table){
   global $conexion;
+  if (!$conexion) return false;
   $rs = @$conexion->query("SHOW TABLES LIKE '". $conexion->real_escape_string($table) ."'");
   return ($rs && $rs->num_rows>0);
 }
 function db_cols($table){
   global $conexion;
   $cols = [];
-  if ($rs=@$conexion->query("SHOW COLUMNS FROM `$table`")) {
+  if ($conexion && ($rs=@$conexion->query("SHOW COLUMNS FROM `$table`"))) {
     while($r=$rs->fetch_assoc()){ $cols[$r['Field']] = $r; }
   }
   return $cols;
 }
 function hascol($table,$col){
   global $conexion;
+  if (!$conexion) return false;
   $rs = @$conexion->query("SHOW COLUMNS FROM `$table` LIKE '".$conexion->real_escape_string($col)."'");
   return ($rs && $rs->num_rows>0);
 }
@@ -149,7 +157,83 @@ function choose_status_value($method, $table, $col){
   return $is_unpaid ? 'pendiente' : 'pagado';
 }
 
-/* ===== Manejo de STOCK y Reservas ===== */
+/* ===== Manejo de STOCK y visibilidad ===== */
+// Stock total del producto (suma variantes o lee products.stock)
+function product_total_stock($product_id){
+  global $conexion;
+  $product_id=(int)$product_id;
+  $sum = 0;
+
+  if (db_has_table('product_variants') && (hascol('product_variants','stock') || hascol('product_variants','existencia'))) {
+    $col = hascol('product_variants','stock') ? 'stock' : 'existencia';
+    if ($st=$conexion->prepare("SELECT COALESCE(SUM(GREATEST($col,0)),0) AS s FROM product_variants WHERE product_id=?")) {
+      $st->bind_param('i',$product_id); $st->execute();
+      $r=$st->get_result()->fetch_assoc(); $st->close();
+      $sum = (int)($r['s'] ?? 0);
+      return $sum;
+    }
+  }
+
+  if (db_has_table('products') && (hascol('products','stock') || hascol('products','existencia'))) {
+    $colp = hascol('products','stock') ? 'stock' : 'existencia';
+    if ($st=$conexion->prepare("SELECT COALESCE(GREATEST($colp,0),0) AS s FROM products WHERE id=?")) {
+      $st->bind_param('i',$product_id); $st->execute();
+      $r=$st->get_result()->fetch_assoc(); $st->close();
+      $sum = (int)($r['s'] ?? 0);
+    }
+  }
+  return $sum;
+}
+
+// Activa/Desactiva (o borra) el producto según stock total
+function set_product_active_by_stock($product_id){
+  global $conexion;
+  $product_id=(int)$product_id;
+  if (!db_has_table('products')) return;
+
+  $stock = product_total_stock($product_id);
+  $on = ($stock > 0) ? 1 : 0;
+
+  // columnas booleanas típicas
+  foreach (['active','is_active','enabled','available','visible'] as $col) {
+    if (hascol('products',$col)) {
+      if ($st=$conexion->prepare("UPDATE products SET `$col`=? WHERE id=?")) {
+        $st->bind_param('ii',$on,$product_id); $st->execute(); $st->close();
+      }
+      if (!$on && DELETE_PRODUCT_WHEN_OUT_OF_STOCK) {
+        @$conexion->query("DELETE FROM products WHERE id=".$product_id." LIMIT 1");
+      }
+      return;
+    }
+  }
+
+  // si hay status ENUM
+  if (hascol('products','status')) {
+    $type = coltype('products','status');
+    if ($type && strpos($type,'enum(')===0) {
+      preg_match_all("/'([^']+)'/",$type,$m); $opts=$m[1]??[];
+      $actPref=['active','activo','habilitado','visible','publicado'];
+      $inaPref=['inactive','inactivo','oculto','no_disponible','agotado','paused'];
+      $target = $on ? $actPref : $inaPref;
+      $val = $opts[0] ?? ($on ? 'active' : 'inactive');
+      foreach ($target as $p) foreach ($opts as $opt) if (strcasecmp($p,$opt)===0){ $val=$opt; break 2; }
+      if ($st=$conexion->prepare("UPDATE products SET status=? WHERE id=?")) {
+        $st->bind_param('si',$val,$product_id); $st->execute(); $st->close();
+      }
+      if (!$on && DELETE_PRODUCT_WHEN_OUT_OF_STOCK) {
+        @$conexion->query("DELETE FROM products WHERE id=".$product_id." LIMIT 1");
+      }
+      return;
+    }
+  }
+
+  // fallback: borrar si no hay forma de ocultar y está en 0
+  if (!$on && DELETE_PRODUCT_WHEN_OUT_OF_STOCK) {
+    @$conexion->query("DELETE FROM products WHERE id=".$product_id." LIMIT 1");
+  }
+}
+
+// Descuenta/repone stock y actualiza visibilidad del producto
 function adjust_stock($product_id, $variant_id, $qty_change){
   global $conexion;
   $product_id=(int)$product_id; $variant_id=(int)$variant_id; $qty_change=(int)$qty_change;
@@ -160,7 +244,7 @@ function adjust_stock($product_id, $variant_id, $qty_change){
     if ($col) {
       if ($st=$conexion->prepare("UPDATE product_variants SET `$col`=GREATEST(0, `$col`+?) WHERE id=? AND product_id=?")) {
         $st->bind_param('iii',$qty_change,$variant_id,$product_id);
-        $st->execute(); $st->close(); return;
+        $st->execute(); $st->close();
       }
     }
   }
@@ -174,7 +258,11 @@ function adjust_stock($product_id, $variant_id, $qty_change){
       }
     }
   }
+
+  // actualizar visibilidad/eliminación según stock total
+  set_product_active_by_stock($product_id);
 }
+
 function ensure_reservations_table(){
   global $conexion;
   @$conexion->query("CREATE TABLE IF NOT EXISTS stock_reservations (
@@ -242,18 +330,27 @@ $SHIPPING = [
 ];
 
 /* ===== Estado DB / esquema ===== */
-$db_ok=false; $has_products=$has_variants=false;
-$has_image_url=$has_product_price=false; $has_variant_price=false;
+$db_ok=false; $has_products=false; $has_variants=false;
+$has_image_url=false; $has_product_price=false; $has_variant_price=false;
 if ($has_conn && isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno) {
   $db_ok=true;
-  $has_products      = (@$conexion->query("SHOW TABLES LIKE 'products'")?->num_rows ?? 0) > 0;
-  $has_variants      = (@$conexion->query("SHOW TABLES LIKE 'product_variants'")?->num_rows ?? 0) > 0;
+
+  $tmp = @$conexion->query("SHOW TABLES LIKE 'products'");
+  $has_products = ($tmp && $tmp->num_rows>0);
+
+  $tmp = @$conexion->query("SHOW TABLES LIKE 'product_variants'");
+  $has_variants = ($tmp && $tmp->num_rows>0);
+
   if ($has_products) {
-    $has_image_url     = (@$conexion->query("SHOW COLUMNS FROM products LIKE 'image_url'")?->num_rows ?? 0) > 0;
-    $has_product_price = (@$conexion->query("SHOW COLUMNS FROM products LIKE 'price'")?->num_rows ?? 0) > 0;
+    $tmp = @$conexion->query("SHOW COLUMNS FROM products LIKE 'image_url'");
+    $has_image_url = ($tmp && $tmp->num_rows>0);
+
+    $tmp = @$conexion->query("SHOW COLUMNS FROM products LIKE 'price'");
+    $has_product_price = ($tmp && $tmp->num_rows>0);
   }
   if ($has_variants) {
-    $has_variant_price = (@$conexion->query("SHOW COLUMNS FROM product_variants LIKE 'price'")?->num_rows ?? 0) > 0;
+    $tmp = @$conexion->query("SHOW COLUMNS FROM product_variants LIKE 'price'");
+    $has_variant_price = ($tmp && $tmp->num_rows>0);
   }
 }
 
@@ -317,23 +414,19 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         $nameP='Producto #'.$pid; $price=0.0;
         if ($db_ok && $has_products) {
           if ($has_variants && $has_variant_price && $vid>0) {
-            if ($rv=@$conexion->query("SELECT price FROM product_variants WHERE id={$vid} AND product_id={$pid} LIMIT 1")) {
-              if ($rr=$rv->fetch_assoc()) $price=(float)($rr['price']??0);
-            }
+            $rv=@$conexion->query("SELECT price FROM product_variants WHERE id={$vid} AND product_id={$pid} LIMIT 1");
+            if ($rv && ($rr=$rv->fetch_assoc())) $price=(float)($rr['price']??0);
           }
           if ($price<=0 && $has_variants && $has_variant_price) {
-            if ($rv=@$conexion->query("SELECT MIN(price) AS p FROM product_variants WHERE product_id={$pid}")) {
-              if ($rr=$rv->fetch_assoc()) $price=(float)($rr['p']??0);
-            }
+            $rv=@$conexion->query("SELECT MIN(price) AS p FROM product_variants WHERE product_id={$pid}");
+            if ($rv && ($rr=$rv->fetch_assoc())) $price=(float)($rr['p']??0);
           }
           if ($price<=0 && $has_product_price) {
-            if ($rp=@$conexion->query("SELECT price FROM products WHERE id={$pid} LIMIT 1")) {
-              if ($rr=$rp->fetch_assoc()) $price=(float)($rr['price']??0);
-            }
+            $rp=@$conexion->query("SELECT price FROM products WHERE id={$pid} LIMIT 1");
+            if ($rp && ($rr=$rp->fetch_assoc())) $price=(float)($rr['price']??0);
           }
-          if ($rp2=@$conexion->query("SELECT name FROM products WHERE id={$pid} LIMIT 1")) {
-            if ($rr2=$rp2->fetch_assoc()) $nameP=$rr2['name']?:$nameP;
-          }
+          $rp2=@$conexion->query("SELECT name FROM products WHERE id={$pid} LIMIT 1");
+          if ($rp2 && ($rr2=$rp2->fetch_assoc())) $nameP=$rr2['name']?:$nameP;
         }
         $lt=$price*$qty; $subtotal+=$lt;
         $items[]=['pid'=>$pid,'vid'=>$vid,'name'=>$nameP,'qty'=>$qty,'price'=>$price,'line_total'=>$lt];
@@ -431,7 +524,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
           foreach ($items as $it) {
             insert_dynamic_row('sale_items', sale_item_payload($sale_id,$it));
 
-            // Descontar stock
+            // Descontar stock y actualizar visibilidad
             adjust_stock((int)$it['pid'], (int)$it['vid'], - (int)$it['qty']);
 
             // Reservar 24h para métodos no pago
@@ -473,21 +566,22 @@ foreach ($cart as $k => $it) {
   if ($db_ok && $has_products) {
     $sqlp = $has_image_url ? "SELECT name,image_url FROM products WHERE id={$pid} LIMIT 1"
                            : "SELECT name FROM products WHERE id={$pid} LIMIT 1";
-    if ($res=@$conexion->query($sqlp)) if ($row=$res->fetch_assoc()) {
+    $res=@$conexion->query($sqlp);
+    if ($res && ($row=$res->fetch_assoc())) {
       if (!empty($row['name'])) $nameP=$row['name'];
       if ($has_image_url && !empty($row['image_url'])) $img=$row['image_url'];
     }
     if ($has_variants && $has_variant_price && $vid>0) {
-      if ($rv=@$conexion->query("SELECT price FROM product_variants WHERE id={$vid} AND product_id={$pid} LIMIT 1"))
-        if ($rr=$rv->fetch_assoc()) $price=(float)($rr['price']??0);
+      $rv=@$conexion->query("SELECT price FROM product_variants WHERE id={$vid} AND product_id={$pid} LIMIT 1");
+      if ($rv && ($rr=$rv->fetch_assoc())) $price=(float)($rr['price']??0);
     }
     if ($price<=0 && $has_variants && $has_variant_price) {
-      if ($rv=@$conexion->query("SELECT MIN(price) AS p FROM product_variants WHERE product_id={$pid}"))
-        if ($rr=$rv->fetch_assoc()) $price=(float)($rr['p']??0);
+      $rv=@$conexion->query("SELECT MIN(price) AS p FROM product_variants WHERE product_id={$pid}");
+      if ($rv && ($rr=$rv->fetch_assoc())) $price=(float)($rr['p']??0);
     }
     if ($price<=0 && $has_product_price) {
-      if ($rp=@$conexion->query("SELECT price FROM products WHERE id={$pid} LIMIT 1"))
-        if ($rr=$rp->fetch_assoc()) $price=(float)($rr['price']??0);
+      $rp=@$conexion->query("SELECT price FROM products WHERE id={$pid} LIMIT 1");
+      if ($rp && ($rr=$rp->fetch_assoc())) $price=(float)($rr['price']??0);
     }
   }
   $lt=$price*$qty; $subtotal+=$lt;

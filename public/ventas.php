@@ -22,7 +22,16 @@ if (!function_exists('page_head')) {
 /* ===== Helpers ===== */
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
+/* Polyfills PHP < 8 */
+if (!function_exists('str_contains'))    { function str_contains($h,$n){ return $n!=='' && mb_strpos($h,$n)!==false; } }
+if (!function_exists('str_starts_with')) { function str_starts_with($h,$n){ return mb_substr($h,0,mb_strlen($n))===$n; } }
 function infer_type($v){ if (is_int($v)) return 'i'; if (is_float($v)) return 'd'; if (is_numeric($v)) return (str_contains((string)$v,'.')?'d':'i'); return 's'; }
+
+/* ===== Config: borrar producto al quedar sin stock =====
+   Poné true si querés que se BORRE el producto cuando el stock total llegue a 0 */
+if (!defined('DELETE_PRODUCT_WHEN_OUT_OF_STOCK')) {
+  define('DELETE_PRODUCT_WHEN_OUT_OF_STOCK', false);
+}
 
 /* ===== URL base ===== */
 $BASE = rtrim(dirname($_SERVER['SCRIPT_NAME'] ?? ''), '/\\');
@@ -34,98 +43,129 @@ if (!function_exists('url')) {
 $db_ok = isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno;
 
 /* ===== Utilidades DB ===== */
-function t_exists($t){ global $conexion; $r=@$conexion->query("SHOW TABLES LIKE '". $conexion->real_escape_string($t) ."'"); return ($r && $r->num_rows>0); }
-function hascol($t,$c){ global $conexion; $r=@$conexion->query("SHOW COLUMNS FROM `$t` LIKE '".$conexion->real_escape_string($c)."'"); return ($r && $r->num_rows>0); }
+function t_exists($t){
+  global $conexion; if (!$conexion) return false;
+  $r=@$conexion->query("SHOW TABLES LIKE '". $conexion->real_escape_string($t) ."'");
+  return ($r && $r->num_rows>0);
+}
+function hascol($t,$c){
+  global $conexion; if (!$conexion) return false;
+  $r=@$conexion->query("SHOW COLUMNS FROM `$t` LIKE '".$conexion->real_escape_string($c)."'");
+  return ($r && $r->num_rows>0);
+}
 
-/* ===== Stock helpers (con activar/desactivar producto) ===== */
+/* ===== Stock helpers (activar/ocultar/borrar producto) ===== */
 function stock_column($table){
   if (hascol($table,'stock')) return 'stock';
   if (hascol($table,'existencia')) return 'existencia';
   return null;
 }
-function product_stock_left($product_id){
+function product_total_stock($product_id){
   global $conexion;
-  $pid=(int)$product_id;
-  // Variantes: sumar
+  $pid=(int)$product_id; if (!$conexion) return 0;
+  // Variantes
   if (t_exists('product_variants')) {
     $colv = stock_column('product_variants');
-    if ($colv) {
-      if ($st=$conexion->prepare("SELECT COALESCE(SUM(`$colv`),0) s FROM product_variants WHERE product_id=?")){
-        $st->bind_param('i',$pid); $st->execute();
-        $s = (float)($st->get_result()->fetch_row()[0] ?? 0); $st->close();
-        return $s;
-      }
+    if ($colv && ($st=$conexion->prepare("SELECT COALESCE(SUM(GREATEST(`$colv`,0)),0) s FROM product_variants WHERE product_id=?"))){
+      $st->bind_param('i',$pid); $st->execute();
+      $s = (int)($st->get_result()->fetch_row()[0] ?? 0); $st->close();
+      return $s;
     }
   }
   // Producto simple
   if (t_exists('products')) {
     $colp = stock_column('products');
-    if ($colp && ($st=$conexion->prepare("SELECT COALESCE(`$colp`,0) FROM products WHERE id=? LIMIT 1"))){
+    if ($colp && ($st=$conexion->prepare("SELECT COALESCE(GREATEST(`$colp`,0),0) FROM products WHERE id=? LIMIT 1"))){
       $st->bind_param('i',$pid); $st->execute();
-      $s = (float)($st->get_result()->fetch_row()[0] ?? 0); $st->close();
+      $s = (int)($st->get_result()->fetch_row()[0] ?? 0); $st->close();
       return $s;
     }
   }
-  return null; // desconocido
+  return 0;
 }
-function set_product_active($product_id, $active){
+function set_product_active_by_stock($product_id){
   global $conexion;
-  if (!t_exists('products') || !hascol('products','active')) return;
-  if ($st=$conexion->prepare("UPDATE products SET active=? WHERE id=?")){
-    $a = $active ? 1 : 0; $pid=(int)$product_id;
-    $st->bind_param('ii',$a,$pid); $st->execute(); $st->close();
-  }
-}
-function maybe_deactivate_if_zero($product_id){
-  $left = product_stock_left($product_id);
-  if ($left!==null && $left<=0) set_product_active($product_id, 0);
-}
-function maybe_reactivate_if_available($product_id){
-  $left = product_stock_left($product_id);
-  if ($left!==null && $left>0) set_product_active($product_id, 1);
-}
-function adjust_stock($product_id, $variant_id, $qty_change){
-  global $conexion;
-  $product_id=(int)$product_id; $variant_id=(int)$variant_id; $qty_change=(int)$qty_change;
+  $pid=(int)$product_id; if (!$conexion || !t_exists('products')) return;
 
-  if (t_exists('product_variants') && $variant_id>0) {
-    $col = stock_column('product_variants');
-    if ($col && ($st=$conexion->prepare("UPDATE product_variants SET `$col`=GREATEST(0,`$col`+?) WHERE id=? AND product_id=?"))) {
-      $st->bind_param('iii',$qty_change,$variant_id,$product_id);
-      $st->execute(); $st->close();
-      // actualizar estado visible
-      if ($qty_change<0) maybe_deactivate_if_zero($product_id);
-      else maybe_reactivate_if_available($product_id);
+  $stock = product_total_stock($pid);
+  $on = ($stock>0) ? 1 : 0;
+
+  // boolean-like columns
+  foreach (['active','is_active','enabled','available','visible'] as $col) {
+    if (hascol('products',$col)) {
+      if ($st=$conexion->prepare("UPDATE products SET `$col`=? WHERE id=?")) {
+        $st->bind_param('ii',$on,$pid); $st->execute(); $st->close();
+      }
+      if (!$on && DELETE_PRODUCT_WHEN_OUT_OF_STOCK) {
+        @$conexion->query("DELETE FROM products WHERE id=".$pid." LIMIT 1");
+      }
       return;
     }
   }
+
+  // ENUM status
+  if (hascol('products','status')) {
+    $typeRow = @$conexion->query("SHOW COLUMNS FROM products LIKE 'status'")?->fetch_assoc();
+    $type = strtolower($typeRow['Type'] ?? '');
+    if (strpos($type,'enum(')===0) {
+      preg_match_all("/'([^']+)'/",$type,$m); $opts=$m[1]??[];
+      $actPref=['active','activo','habilitado','visible','publicado'];
+      $inaPref=['inactive','inactivo','oculto','no_disponible','agotado','paused'];
+      $target = $on ? $actPref : $inaPref;
+      $val = $opts[0] ?? ($on ? 'active' : 'inactive');
+      foreach ($target as $p) foreach ($opts as $opt) if (strcasecmp($p,$opt)===0){ $val=$opt; break 2; }
+      if ($st=$conexion->prepare("UPDATE products SET status=? WHERE id=?")) {
+        $st->bind_param('si',$val,$pid); $st->execute(); $st->close();
+      }
+      if (!$on && DELETE_PRODUCT_WHEN_OUT_OF_STOCK) {
+        @$conexion->query("DELETE FROM products WHERE id=".$pid." LIMIT 1");
+      }
+      return;
+    }
+  }
+
+  // fallback: borrar si no hay otra forma de ocultar
+  if (!$on && DELETE_PRODUCT_WHEN_OUT_OF_STOCK) {
+    @$conexion->query("DELETE FROM products WHERE id=".$pid." LIMIT 1");
+  }
+}
+function adjust_stock($product_id, $variant_id, $qty_change){
+  global $conexion;
+  $pid=(int)$product_id; $vid=(int)$variant_id; $q=(int)$qty_change; if (!$conexion) return;
+
+  // Variantes
+  if (t_exists('product_variants') && $vid>0) {
+    $col = stock_column('product_variants');
+    if ($col && ($st=$conexion->prepare("UPDATE product_variants SET `$col`=GREATEST(0,`$col`+?) WHERE id=? AND product_id=?"))) {
+      $st->bind_param('iii',$q,$vid,$pid);
+      $st->execute(); $st->close();
+    }
+  }
+  // Producto
   if (t_exists('products')) {
     $colp = stock_column('products');
     if ($colp && ($st=$conexion->prepare("UPDATE products SET `$colp`=GREATEST(0,`$colp`+?) WHERE id=?"))) {
-      $st->bind_param('ii',$qty_change,$product_id);
+      $st->bind_param('ii',$q,$pid);
       $st->execute(); $st->close();
-      if ($qty_change<0) maybe_deactivate_if_zero($product_id);
-      else maybe_reactivate_if_available($product_id);
     }
   }
+  // Actualizar visibilidad/eliminación
+  set_product_active_by_stock($pid);
 }
 
 /* ===== Reservas ===== */
 function reservations_table_exists(){ return t_exists('stock_reservations'); }
 function close_reservations_without_restock($sale_id){
-  global $conexion;
-  if (!reservations_table_exists()) return;
+  global $conexion; if (!$conexion || !reservations_table_exists()) return;
   if ($st=$conexion->prepare("UPDATE stock_reservations SET released_at=NOW() WHERE sale_id=? AND released_at IS NULL")) {
     $st->bind_param('i',$sale_id); $st->execute(); $st->close();
   }
 }
 function restock_from_reservations($sale_id){
-  global $conexion;
-  if (!reservations_table_exists()) return false;
+  global $conexion; if (!$conexion || !reservations_table_exists()) return false;
   $sql="SELECT id,product_id,variant_id,qty FROM stock_reservations WHERE sale_id=? AND released_at IS NULL";
   if ($st=$conexion->prepare($sql)) {
-    $st->bind_param('i',$sale_id);
-    $st->execute(); $rs=$st->get_result();
+    $st->bind_param('i',$sale_id); $st->execute(); $rs=$st->get_result();
     $found=false;
     while($r=$rs->fetch_assoc()){
       $found=true;
@@ -140,8 +180,7 @@ function restock_from_reservations($sale_id){
   return false;
 }
 function restock_from_sale_items($sale_id){
-  global $conexion;
-  if (!t_exists('sale_items')) return false;
+  global $conexion; if (!$conexion || !t_exists('sale_items')) return false;
   $st = $conexion->prepare("SELECT product_id,variant_id,qty FROM sale_items WHERE sale_id=?");
   if (!$st) return false;
   $st->bind_param('i',$sale_id); $st->execute(); $rs=$st->get_result();
@@ -156,7 +195,7 @@ function restock_from_sale_items($sale_id){
 
 /* ===== Update dinámico en sales ===== */
 function update_sales_columns($sale_id, array $data){
-  global $conexion;
+  global $conexion; if (!$conexion) return false;
   $set=[]; $types=''; $vals=[];
   foreach($data as $col=>$val){
     if (hascol('sales',$col)){
@@ -175,7 +214,7 @@ function update_sales_columns($sale_id, array $data){
 
 /* ===== Setear estado de forma segura ===== */
 function safe_update_status($sale_id, array $candidates){
-  global $conexion;
+  global $conexion; if (!$conexion) return;
   if (!hascol('sales','status')) return;
   foreach ($candidates as $stVal){
     if ($st = $conexion->prepare("UPDATE sales SET status=? WHERE id=?")) {
