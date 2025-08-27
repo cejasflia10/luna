@@ -20,8 +20,9 @@ if (!function_exists('page_head')) {
 }
 
 /* ===== Helpers ===== */
-if (!function_exists('h')) { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
+if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
+function infer_type($v){ if (is_int($v)) return 'i'; if (is_float($v)) return 'd'; if (is_numeric($v)) return (str_contains((string)$v,'.')?'d':'i'); return 's'; }
 
 /* ===== URL base ===== */
 $BASE = rtrim(dirname($_SERVER['SCRIPT_NAME'] ?? ''), '/\\');
@@ -41,7 +42,6 @@ function adjust_stock($product_id, $variant_id, $qty_change){
   global $conexion;
   $product_id=(int)$product_id; $variant_id=(int)$variant_id; $qty_change=(int)$qty_change;
 
-  // variantes
   if (t_exists('product_variants') && $variant_id>0) {
     $col = hascol('product_variants','stock') ? 'stock' : (hascol('product_variants','existencia') ? 'existencia' : null);
     if ($col && ($st=$conexion->prepare("UPDATE product_variants SET `$col`=GREATEST(0,`$col`+?) WHERE id=? AND product_id=?"))) {
@@ -49,7 +49,6 @@ function adjust_stock($product_id, $variant_id, $qty_change){
       $st->execute(); $st->close(); return;
     }
   }
-  // productos
   if (t_exists('products')) {
     $colp = hascol('products','stock') ? 'stock' : (hascol('products','existencia') ? 'existencia' : null);
     if ($colp && ($st=$conexion->prepare("UPDATE products SET `$colp`=GREATEST(0,`$colp`+?) WHERE id=?"))) {
@@ -74,8 +73,7 @@ function restock_from_reservations($sale_id){
   $sql="SELECT id,product_id,variant_id,qty FROM stock_reservations WHERE sale_id=? AND released_at IS NULL";
   if ($st=$conexion->prepare($sql)) {
     $st->bind_param('i',$sale_id);
-    $st->execute();
-    $rs=$st->get_result();
+    $st->execute(); $rs=$st->get_result();
     $found=false;
     while($r=$rs->fetch_assoc()){
       $found=true;
@@ -102,6 +100,25 @@ function restock_from_sale_items($sale_id){
   }
   $st->close();
   return $found;
+}
+
+/* ===== Update dinámico en sales ===== */
+function update_sales_columns($sale_id, array $data){
+  global $conexion;
+  $set=[]; $types=''; $vals=[];
+  foreach($data as $col=>$val){
+    if (hascol('sales',$col)){
+      $set[]="`$col`=?"; $types .= infer_type($val); $vals[]=$val;
+    }
+  }
+  if (!$set) return false;
+  $sql="UPDATE sales SET ".implode(',',$set)." WHERE id=?";
+  $types .= 'i'; $vals[]=(int)$sale_id;
+  $st=$conexion->prepare($sql);
+  if(!$st) throw new Exception('SQL PREPARE update sales: '.$conexion->error);
+  $st->bind_param($types, ...$vals);
+  if(!$st->execute()){ $e=$st->error; $st->close(); throw new Exception('SQL EXEC update sales: '.$e); }
+  $st->close(); return true;
 }
 
 /* ===== Setear estado de forma segura ===== */
@@ -162,7 +179,7 @@ if ($db_ok && (($_GET['__ajax'] ?? '')==='find_sku')) {
   }
 }
 
-/* ===== Config POS ===== */
+/* ===== Config POS/pagos ===== */
 $PAY_METHODS = [
   'efectivo'      => 'Efectivo',
   'debito'        => 'Débito',
@@ -173,32 +190,86 @@ $PAY_METHODS = [
 $DISCOUNT_OPTIONS = [0,5,10,15,20,25];
 $UNPAID_METHODS = ['efectivo','transferencia','cuenta_corriente'];
 
-/* ===== Acciones confirmar/cancelar online ===== */
+/* ===== Acciones confirmar/cancelar ONLINE ===== */
 $okMsg=''; $errMsg='';
 if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST') {
   $act = $_POST['__action'] ?? '';
-  if ($act==='mark_online_paid' || $act==='cancel_online') {
+
+  if ($act==='mark_online_paid') {
     try{
       $sale_id = max(0,(int)($_POST['sale_id'] ?? 0));
       if ($sale_id<=0) throw new Exception('Venta inválida');
 
-      $conexion->begin_transaction();
+      // leer venta original para calcular totales
+      $row=null;
+      if ($st=$conexion->prepare("SELECT * FROM sales WHERE id=?")) {
+        $st->bind_param('i',$sale_id); $st->execute(); $row=$st->get_result()->fetch_assoc(); $st->close();
+      }
+      if (!$row) throw new Exception('Venta no encontrada');
 
-      if ($act==='mark_online_paid') {
-        safe_update_status($sale_id, ['done','paid','pagado','completed','completada']);
-        if (hascol('sales','paid_at')) {
-          if ($st=$conexion->prepare("UPDATE sales SET paid_at=NOW() WHERE id=?")) { $st->bind_param('i',$sale_id); $st->execute(); $st->close(); }
-        }
-        close_reservations_without_restock($sale_id);
-        $okMsg = "✅ Venta #$sale_id confirmada (pago ok).";
-      } else {
-        $done = restock_from_reservations($sale_id);
-        if (!$done) { restock_from_sale_items($sale_id); }
-        safe_update_status($sale_id, ['cancelled','canceled','anulada','rejected','rechazada','expired','expirada']);
-        $okMsg = "↩️ Venta #$sale_id cancelada y stock devuelto.";
+      // total original robusto
+      $orig_total = 0.0;
+      foreach (['total','grand_total','amount','monto','importe','total_amount','total_final'] as $k) {
+        if (isset($row[$k]) && is_numeric($row[$k])) { $orig_total=(float)$row[$k]; break; }
+      }
+      if ($orig_total<=0){
+        $subtotal = (float)($row['subtotal'] ?? 0);
+        $discount = (float)($row['discount'] ?? ($row['descuento'] ?? 0));
+        $fee      = (float)($row['fee'] ?? ($row['recargo'] ?? 0));
+        $ship     = (float)($row['shipping_cost'] ?? ($row['delivery_cost'] ?? ($row['costo_envio'] ?? 0)));
+        $orig_total = max(0,$subtotal - $discount + $fee + $ship);
       }
 
+      // inputs de confirmación
+      $pay_method   = trim((string)($_POST['pay_method'] ?? 'efectivo'));
+      $installments = max(1,(int)($_POST['installments'] ?? 1));
+      $disc_pct     = max(0,(float)($_POST['disc_pct'] ?? 0));
+      $disc_abs     = max(0,(float)($_POST['disc_abs'] ?? 0));
+      $fee_pct      = max(0,(float)($_POST['fee_pct'] ?? 0));
+      $fee_abs      = max(0,(float)($_POST['fee_abs'] ?? 0));
+
+      $extra_discount = round(($orig_total * ($disc_pct/100)) + $disc_abs, 2);
+      $extra_fee      = round(($orig_total * ($fee_pct/100)) + $fee_abs, 2);
+      $final_total    = round(max(0, $orig_total - $extra_discount + $extra_fee), 2);
+
+      $upd = [
+        'payment_method' => $pay_method,
+        'installments'   => $installments,
+        'total'          => $final_total,
+        'paid_at'        => date('Y-m-d H:i:s')
+      ];
+
+      // sumar descuentos/recargos si existen
+      if (hascol('sales','discount')) { $upd['discount'] = (float)($row['discount'] ?? 0) + $extra_discount; }
+      if (hascol('sales','fee'))      { $upd['fee']      = (float)($row['fee'] ?? 0)      + $extra_fee; }
+
+      $conexion->begin_transaction();
+      update_sales_columns($sale_id, $upd);
+      safe_update_status($sale_id, ['done','paid','pagado','completed','completada']);
+      close_reservations_without_restock($sale_id);
       $conexion->commit();
+
+      $okMsg = "✅ Venta #$sale_id confirmada. Total original $ ".money($orig_total)
+             ." → total final $ ".money($final_total)
+             .($extra_discount>0 ? " (descuento $ ".money($extra_discount).")" : "")
+             .($extra_fee>0 ? " (recargo $ ".money($extra_fee).")" : "");
+
+    } catch(Throwable $e){
+      if ($conexion && $conexion instanceof mysqli) { @$conexion->rollback(); }
+      $errMsg = '❌ '.$e->getMessage();
+    }
+  }
+
+  if ($act==='cancel_online') {
+    try{
+      $sale_id = max(0,(int)($_POST['sale_id'] ?? 0));
+      if ($sale_id<=0) throw new Exception('Venta inválida');
+      $conexion->begin_transaction();
+      $done = restock_from_reservations($sale_id);
+      if (!$done) { restock_from_sale_items($sale_id); }
+      safe_update_status($sale_id, ['cancelled','canceled','anulada','rejected','rechazada','expired','expirada']);
+      $conexion->commit();
+      $okMsg = "↩️ Venta #$sale_id cancelada y stock devuelto.";
     } catch(Throwable $e){
       if ($conexion && $conexion instanceof mysqli) { @$conexion->rollback(); }
       $errMsg = '❌ '.$e->getMessage();
@@ -206,7 +277,7 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST') {
   }
 }
 
-/* ===== Guardar venta POS ===== */
+/* ===== Guardar venta POS (local) ===== */
 if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'] ?? '')==='create_sale')) {
   try {
     if (!t_exists('sales')) {
@@ -338,8 +409,6 @@ if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'
 $pending = [];
 if ($db_ok && t_exists('sales')) {
   $cond = [];
-
-  // origen/indicios de online
   if (hascol('sales','origin')) {
     $cond[] = "origin='online'";
   } elseif (hascol('sales','shipping_method')) {
@@ -349,20 +418,15 @@ if ($db_ok && t_exists('sales')) {
   } else {
     $cond[] = "1=1";
   }
-
-  // estados: excluir sólo finales
   $finalStates = ["'done'","'paid'","'pagado'","'completed'","'completada'","'cancelled'","'canceled'","'anulada'","'rejected'","'rechazada'","'expired'","'expirada'"];
   if (hascol('sales','status')) {
     $cond[] = "(status IS NULL OR status='' OR status NOT IN(".implode(',',$finalStates)."))";
   } elseif (hascol('sales','created_at')) {
     $cond[] = "created_at >= NOW() - INTERVAL 7 DAY";
   }
-
-  // si existe paid_at, considerar pendiente cuando no tiene fecha de pago
   if (hascol('sales','paid_at')) {
     $cond[] = "(paid_at IS NULL)";
   }
-
   $order = hascol('sales','created_at') ? "ORDER BY created_at DESC" : "ORDER BY id DESC";
   $sql   = "SELECT * FROM sales WHERE ".implode(' AND ',$cond)." $order LIMIT 100";
   if ($rs=@$conexion->query($sql)) {
@@ -387,10 +451,12 @@ function row_get($row, $keys, $default=''){
     .btn{display:inline-block;padding:.5rem .9rem;border:1px solid var(--ring,#2d323d);border-radius:.6rem;background:transparent;color:inherit;text-decoration:none;cursor:pointer}
     .btn[disabled]{opacity:.6;cursor:not-allowed}
     .table{width:100%;border-collapse:collapse}
-    .table th,.table td{border-bottom:1px solid var(--ring,#2d323d);padding:8px;text-align:left}
+    .table th,.table td{border-bottom:1px solid var(--ring,#2d323d);padding:8px;text-align:left;vertical-align:top}
     .row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
     @media (max-width:900px){ .row{grid-template-columns:1fr} }
-    input,select{width:100%;padding:.5rem;border:1px solid var(--ring,#2d323d);background:transparent;color:var(--fg);border-radius:.5rem}
+    input,select{width:100%;padding:.4rem;border:1px solid var(--ring,#2d323d);background:transparent;color:var(--fg);border-radius:.5rem}
+    .mini input{width:80px}
+    .mini select{width:120px}
     .tot{display:flex;justify-content:space-between;margin-top:8px}
     .alert{background:#2a1b1b;border:1px solid #7f1d1d;color:#fecaca;border-radius:8px;padding:10px;margin:10px 0}
     .ok{background:#1b2a1d;border:1px solid #14532d;color:#bbf7d0;border-radius:8px;padding:10px;margin:10px 0}
@@ -402,7 +468,7 @@ function row_get($row, $keys, $default=''){
 
 <?php if (file_exists($root.'/includes/header.php')) require $root.'/includes/header.php'; ?>
 
-<?php page_head('Ventas', 'Confirma pagos online y registra ventas en el local.'); ?>
+<?php page_head('Ventas', 'Confirma pagos online (con descuento/recargo) y registra ventas en el local.'); ?>
 
 <main class="container">
 
@@ -423,7 +489,11 @@ function row_get($row, $keys, $default=''){
         <table class="table">
           <thead>
             <tr>
-              <th>ID</th><th>Fecha</th><th>Cliente</th><th>Pago</th><th>Tipo</th><th>Total</th><th>Estado</th><th style="width:240px">Acciones</th>
+              <th>ID / Fecha</th>
+              <th>Cliente / Pago</th>
+              <th>Tipo / Total</th>
+              <th style="min-width:340px">Confirmar pago (método, descuentos/recargos)</th>
+              <th>Cancelar</th>
             </tr>
           </thead>
           <tbody>
@@ -434,27 +504,69 @@ function row_get($row, $keys, $default=''){
                 $cli   = h(row_get($s,['customer_name','name','buyer_name','cliente'],'(sin nombre)'));
                 $pay   = h(row_get($s,['payment_method','method','metodo'],''));
                 $ship  = h(row_get($s,['shipping_method','delivery_method','tipo_envio'],''));
-                $total = (float)row_get($s,['total'],0);
-                $status= h(row_get($s,['status','estado'],''));
+                $total_val = 0.0;
+                foreach (['total','grand_total','amount','monto','importe','total_amount','total_final'] as $k)
+                  if (isset($s[$k]) && is_numeric($s[$k])) { $total_val=(float)$s[$k]; break; }
+                if ($total_val<=0){
+                  $subtotal = (float)($s['subtotal'] ?? 0);
+                  $discount = (float)($s['discount'] ?? ($s['descuento'] ?? 0));
+                  $fee      = (float)($s['fee'] ?? ($s['recargo'] ?? 0));
+                  $shipc    = (float)($s['shipping_cost'] ?? ($s['delivery_cost'] ?? ($s['costo_envio'] ?? 0)));
+                  $total_val = max(0,$subtotal - $discount + $fee + $shipc);
+                }
               ?>
               <tr>
-                <td>#<?= $sid ?></td>
-                <td><?= $fecha ?></td>
-                <td><?= $cli ?></td>
-                <td><?= $pay ?></td>
-                <td><?= $ship?:'—' ?></td>
-                <td>$ <?= money($total) ?></td>
-                <td><?= $status?:'pendiente' ?></td>
-                <td>
-                  <form method="post" style="display:inline">
+                <td><b>#<?= $sid ?></b><br><small><?= $fecha ?></small></td>
+                <td><?= $cli ?><br><small><?= $pay?:'—' ?></small></td>
+                <td><?= $ship?:'—' ?><br><b>$ <?= money($total_val) ?></b></td>
+                <td class="mini">
+                  <form method="post" style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">
                     <input type="hidden" name="__action" value="mark_online_paid">
                     <input type="hidden" name="sale_id" value="<?= $sid ?>">
+
+                    <label style="display:flex;flex-direction:column">
+                      <span>Método</span>
+                      <select name="pay_method">
+                        <?php foreach($PAY_METHODS as $k=>$v): ?>
+                          <option value="<?=$k?>" <?= ($pay===$k?'selected':'') ?>><?=$v?></option>
+                        <?php endforeach; ?>
+                      </select>
+                    </label>
+
+                    <label style="display:flex;flex-direction:column">
+                      <span>Cuotas</span>
+                      <input type="number" name="installments" min="1" value="<?= (int)row_get($s,['installments','cuotas'],1) ?>">
+                    </label>
+
+                    <label style="display:flex;flex-direction:column">
+                      <span>Desc. %</span>
+                      <input type="number" step="0.01" min="0" name="disc_pct" placeholder="0">
+                    </label>
+
+                    <label style="display:flex;flex-direction:column">
+                      <span>Desc. $</span>
+                      <input type="number" step="0.01" min="0" name="disc_abs" placeholder="0.00">
+                    </label>
+
+                    <label style="display:flex;flex-direction:column">
+                      <span>Rec. %</span>
+                      <input type="number" step="0.01" min="0" name="fee_pct" placeholder="0">
+                    </label>
+
+                    <label style="display:flex;flex-direction:column">
+                      <span>Rec. $</span>
+                      <input type="number" step="0.01" min="0" name="fee_abs" placeholder="0.00">
+                    </label>
+
                     <button class="btn">✅ Confirmar pago</button>
                   </form>
-                  <form method="post" style="display:inline" onsubmit="return confirm('¿Cancelar esta venta y devolver stock?');">
+                  <small style="opacity:.8">Se toma el total registrado (arriba) y se aplican estos descuentos/recargos para calcular el total final.</small>
+                </td>
+                <td>
+                  <form method="post" onsubmit="return confirm('¿Cancelar esta venta y devolver stock?');">
                     <input type="hidden" name="__action" value="cancel_online">
                     <input type="hidden" name="sale_id" value="<?= $sid ?>">
-                    <button class="btn">↩️ Cancelar y devolver stock</button>
+                    <button class="btn">↩️ Cancelar</button>
                   </form>
                 </td>
               </tr>
