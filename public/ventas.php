@@ -1,19 +1,33 @@
 <?php
 if (session_status()===PHP_SESSION_NONE) session_start();
 
-$root = dirname(__DIR__);
-require $root.'/includes/conn.php';
-require $root.'/includes/helpers.php';
-require $root.'/includes/page_head.php';
+/* ===== Resolver $root robusto ===== */
+$root = __DIR__;
+for ($i=0; $i<6; $i++) {
+  if (file_exists($root.'/includes/conn.php')) break;
+  $root = dirname($root);
+}
 
-/* ===== Helpers ===== */
+/* ===== Includes tolerantes ===== */
+@if (file_exists($root.'/includes/conn.php')) require $root.'/includes/conn.php';
+@if (file_exists($root.'/includes/helpers.php')) require $root.'/includes/helpers.php';
+if (file_exists($root.'/includes/page_head.php')) {
+  require $root.'/includes/page_head.php';
+} else {
+  // Fallback por si no existe page_head.php
+  if (!function_exists('page_head')) {
+    function page_head($title,$sub=''){ echo '<header class="container" style="padding:16px 0"><h1 style="margin:0">'.htmlspecialchars($title).'</h1>'.($sub?'<div style="opacity:.8">'.$sub.'</div>':'').'</header>'; }
+  }
+}
+
+/* ===== Helpers locales ===== */
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
 
-/* ===== Rutas ===== */
+/* ===== URL base ===== */
 $BASE = rtrim(dirname($_SERVER['SCRIPT_NAME'] ?? ''), '/\\');
 if (!function_exists('url')) {
-  function url($p){ global $BASE; return rtrim($BASE,'/').'/'.ltrim((string)$p,'/'); }
+  function url($p){ global $BASE; $b=rtrim($BASE,'/'); return ($b===''?'/':$b.'/').ltrim((string)$p,'/'); }
 }
 
 /* ===== Estado DB ===== */
@@ -23,38 +37,64 @@ $db_ok = isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_
 function t_exists($t){ global $conexion; $r=@$conexion->query("SHOW TABLES LIKE '". $conexion->real_escape_string($t) ."'"); return ($r && $r->num_rows>0); }
 function hascol($t,$c){ global $conexion; $r=@$conexion->query("SHOW COLUMNS FROM `$t` LIKE '".$conexion->real_escape_string($c)."'"); return ($r && $r->num_rows>0); }
 
+/* ===== Stock helper (producto o variante) ===== */
+function adjust_stock($product_id, $variant_id, $qty_change){
+  global $conexion;
+  $product_id=(int)$product_id; $variant_id=(int)$variant_id; $qty_change=(int)$qty_change;
+
+  // Variantes
+  if (t_exists('product_variants') && $variant_id>0) {
+    $col = hascol('product_variants','stock') ? 'stock' : (hascol('product_variants','existencia') ? 'existencia' : null);
+    if ($col && ($st=$conexion->prepare("UPDATE product_variants SET `$col`=GREATEST(0,`$col`+?) WHERE id=? AND product_id=?"))) {
+      $st->bind_param('iii',$qty_change,$variant_id,$product_id);
+      $st->execute(); $st->close();
+      return;
+    }
+  }
+  // Productos
+  if (t_exists('products')) {
+    $colp = hascol('products','stock') ? 'stock' : (hascol('products','existencia') ? 'existencia' : null);
+    if ($colp && ($st=$conexion->prepare("UPDATE products SET `$colp`=GREATEST(0,`$colp`+?) WHERE id=?"))) {
+      $st->bind_param('ii',$qty_change,$product_id);
+      $st->execute(); $st->close();
+    }
+  }
+}
+
 /* ===== AJAX: buscar por SKU ===== */
-if (($db_ok) && (($_GET['__ajax'] ?? '')==='find_sku')) {
+if ($db_ok && (($_GET['__ajax'] ?? '')==='find_sku')) {
   header('Content-Type: application/json; charset=utf-8');
   try {
     $sku = trim((string)($_GET['sku'] ?? ''));
     if ($sku==='') throw new Exception('SKU vacío');
     $out = ['ok'=>false];
 
-    // 1) Variante por SKU exacto
-    $sql = "SELECT v.id AS variant_id, v.price AS vprice, p.id AS product_id, p.name AS pname
-            FROM product_variants v
-            JOIN products p ON p.id=v.product_id
-            WHERE v.sku=? LIMIT 1";
-    if ($st = $conexion->prepare($sql)) {
-      $st->bind_param('s',$sku);
-      $st->execute();
-      $res = $st->get_result();
-      if ($row = $res->fetch_assoc()) {
-        $out = [
-          'ok'=>true,
-          'product_id'=>(int)$row['product_id'],
-          'variant_id'=>(int)$row['variant_id'],
-          'name'=>(string)$row['pname'],
-          'price'=>(float)($row['vprice'] ?? 0),
-          'source'=>'variant'
-        ];
+    // Variante por SKU
+    if (t_exists('product_variants') && t_exists('products')) {
+      $sql = "SELECT v.id AS variant_id, v.price AS vprice, p.id AS product_id, p.name AS pname
+              FROM product_variants v
+              JOIN products p ON p.id=v.product_id
+              WHERE v.sku=? LIMIT 1";
+      if ($st = $conexion->prepare($sql)) {
+        $st->bind_param('s',$sku);
+        $st->execute();
+        $res = $st->get_result();
+        if ($row = $res->fetch_assoc()) {
+          $out = [
+            'ok'=>true,
+            'product_id'=>(int)$row['product_id'],
+            'variant_id'=>(int)$row['variant_id'],
+            'name'=>(string)$row['pname'],
+            'price'=>(float)($row['vprice'] ?? 0),
+            'source'=>'variant'
+          ];
+        }
+        $st->close();
       }
-      $st->close();
     }
 
-    // 2) Producto por SKU si no hubo variante
-    if (!$out['ok']) {
+    // Producto por SKU si no hubo variante
+    if (!$out['ok'] && t_exists('products')) {
       $sql = "SELECT id, name, price FROM products WHERE sku=? LIMIT 1";
       if ($st = $conexion->prepare($sql)) {
         $st->bind_param('s',$sku);
@@ -90,12 +130,13 @@ $PAY_METHODS = [
   'transferencia' => 'Transferencia',
   'mp'            => 'Mercado Pago',
 ];
-$DISCOUNT_OPTIONS = [0,5,10,15,20,25]; // % para POS
+$DISCOUNT_OPTIONS = [0,5,10,15,20,25];
 
 /* ===== Guardar venta ===== */
 $okMsg=''; $errMsg='';
-if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')==='create_sale') {
+if ($db_ok && ($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && (($_POST['__action'] ?? '')==='create_sale')) {
   try {
+    // Tablas mínimas
     if (!t_exists('sales')) {
       @$conexion->query("CREATE TABLE IF NOT EXISTS sales (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -109,6 +150,7 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
         fee DECIMAL(12,2) NOT NULL DEFAULT 0,
         total DECIMAL(12,2) NOT NULL DEFAULT 0,
         status VARCHAR(20) NOT NULL DEFAULT 'done',
+        origin VARCHAR(20) NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     }
@@ -126,13 +168,14 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     }
 
-    $sold_at      = trim((string)($_POST['sold_at'] ?? '')); // informativo (no siempre se guarda si la tabla no tiene)
+    // Datos del formulario
+    $sold_at      = trim((string)($_POST['sold_at'] ?? '')); // informativo
     $customer     = trim((string)($_POST['customer'] ?? ''));
     $payment      = trim((string)($_POST['payment_method'] ?? 'efectivo'));
     if (!isset($PAY_METHODS[$payment])) $payment = 'efectivo';
     $installments = max(1, (int)($_POST['installments'] ?? 1));
-    $receipt      = trim((string)($_POST['receipt'] ?? ''));
-    $notes        = trim((string)($_POST['notes'] ?? ''));
+    $receipt      = trim((string)($_POST['receipt'] ?? '')); // no se guarda si la tabla no lo tiene
+    $notes        = trim((string)($_POST['notes'] ?? ''));   // idem
     $discount_pct = (int)($_POST['discount_pct'] ?? 0);
     if (!in_array($discount_pct,$DISCOUNT_OPTIONS,true)) $discount_pct = 0;
 
@@ -151,7 +194,7 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
 
       $pid=0; $vid=0; $name='Item'; $price=0.0;
 
-      // 1) Variante por SKU
+      // Variante por SKU
       if (t_exists('product_variants') && t_exists('products')) {
         $sql = "SELECT v.id AS vid,v.price AS vprice,p.id AS pid,p.name AS pname
                 FROM product_variants v
@@ -168,7 +211,7 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
         }
       }
 
-      // 2) Producto por SKU si no se halló variante
+      // Producto por SKU si no hay variante
       if ($pid===0 && t_exists('products')) {
         $sql="SELECT id,name,price FROM products WHERE sku=? LIMIT 1";
         if ($st=$conexion->prepare($sql)) {
@@ -182,10 +225,9 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
         }
       }
 
-      // Si no se encontró nada, uso el SKU como nombre
+      // Nombre fallback
       if ($pid===0) { $name = $sku; }
-
-      // Precio final de línea (permite override manual)
+      // Precio editable
       if ($priceIn > 0) $price = $priceIn;
 
       $line = $price * $qty;
@@ -195,16 +237,16 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
 
     if (!$items) { throw new Exception('Agregá al menos un ítem.'); }
 
-    // Descuento POS
+    // Totales
     $discount = round($subtotal * ($discount_pct/100), 2);
-    $fee = 0.0; // si querés recargos por cuotas, calcular acá
+    $fee = 0.0;
     $total = max(0.0, $subtotal - $discount + $fee);
 
-    // Guardar venta
+    // Guardar
     $conexion->begin_transaction();
 
-    $sql = "INSERT INTO sales (customer_name, customer_phone, customer_email, payment_method, installments, subtotal, discount, fee, total, status)
-            VALUES (?,?,?,?,?,?,?,?,?, 'done')";
+    $sql = "INSERT INTO sales (customer_name, customer_phone, customer_email, payment_method, installments, subtotal, discount, fee, total, status, origin)
+            VALUES (?,?,?,?,?,?,?,?,?, 'done', 'pos')";
     $st = $conexion->prepare($sql);
     if (!$st) throw new Exception('SQL PREPARE sales: '.$conexion->error);
     $empty = '';
@@ -222,11 +264,8 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
       $sti->bind_param('iiisidd', $sale_id, (int)$it['pid'], (int)$it['vid'], $it['name'], (int)$it['qty'], (float)$it['price'], (float)$it['line_total']);
       $sti->execute();
 
-      // Restar stock si hay variante
-      if ($it['vid']>0 && t_exists('product_variants') && hascol('product_variants','stock')) {
-        $upd = $conexion->prepare("UPDATE product_variants SET stock = GREATEST(stock-?,0) WHERE id=?");
-        if ($upd) { $upd->bind_param('ii',$it['qty'],$it['vid']); $upd->execute(); $upd->close(); }
-      }
+      // Descontar stock (variante o producto)
+      adjust_stock((int)$it['pid'], (int)$it['vid'], - (int)$it['qty']);
     }
     $sti->close();
 
@@ -257,22 +296,22 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
     .tot{display:flex;justify-content:space-between;margin-top:8px}
     .alert{background:#2a1b1b;border:1px solid #7f1d1d;color:#fecaca;border-radius:8px;padding:10px;margin:10px 0}
     .ok{background:#1b2a1d;border:1px solid #14532d;color:#bbf7d0;border-radius:8px;padding:10px;margin:10px 0}
+    .card{background:var(--card,#12141a);border:1px solid var(--ring,#2d323d);border-radius:12px;padding:12px}
+    .container{max-width:1100px;margin:0 auto;padding:0 14px}
   </style>
 </head>
 <body>
 
-<?php require $root.'/includes/header.php'; ?>
+<?php if (file_exists($root.'/includes/header.php')) require $root.'/includes/header.php'; ?>
 
-<?php
-page_head('Ventas (Local)', 'Registra ventas en el local con descuento opcional.');
-?>
+<?php page_head('Ventas (Local)', 'Registra ventas en el local con descuento opcional.'); ?>
 
 <main class="container">
   <?php if($okMsg): ?><div class="ok"><?=h($okMsg)?></div><?php endif; ?>
   <?php if($errMsg): ?><div class="alert"><?=h($errMsg)?></div><?php endif; ?>
 
   <h2>➕ Nueva venta</h2>
-  <form class="card" style="padding:14px" method="post">
+  <form class="card" method="post">
     <input type="hidden" name="__action" value="create_sale">
 
     <div class="row">
@@ -332,7 +371,7 @@ page_head('Ventas (Local)', 'Registra ventas en el local con descuento opcional.
   </form>
 </main>
 
-<?php require $root.'/includes/footer.php'; ?>
+<?php if (file_exists($root.'/includes/footer.php')) require $root.'/includes/footer.php'; ?>
 
 <script>
 (function(){
@@ -395,9 +434,7 @@ page_head('Ventas (Local)', 'Registra ventas en el local con descuento opcional.
 
   addBtn.addEventListener('click', ()=>addRow());
   discountSel.addEventListener('change', recalc);
-
-  // fila inicial
-  addRow();
+  addRow(); // fila inicial
 })();
 </script>
 </body>
