@@ -30,8 +30,23 @@ if (!function_exists('urlc')) { // linkear a la tienda
   function urlc($path){ return url_public('clientes/'.ltrim((string)$path,'/')); }
 }
 
-/* ========= Chequeos de esquema ========= */
+/* ========= Utilidades de esquema ========= */
 $db_ok = isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno;
+function db_cols($table){
+  global $conexion; $out=[];
+  if ($rs=@$conexion->query("SHOW COLUMNS FROM `$table`")) while($r=$rs->fetch_assoc()) $out[$r['Field']]=$r;
+  return $out;
+}
+function hascol($table,$col){
+  global $conexion;
+  $rs=@$conexion->query("SHOW COLUMNS FROM `$table` LIKE '". $conexion->real_escape_string($col) ."'");
+  return ($rs && $rs->num_rows>0);
+}
+function coltype($table,$col){
+  $c=db_cols($table); return strtolower($c[$col]['Type'] ?? '');
+}
+
+/* ========= Productos (para Novedades) ========= */
 $has_products=$has_variants=$has_categories_table=false;
 $has_image_url=$has_created_at=$has_category_id=$has_variant_price=false;
 $sql_err=''; $prods=null;
@@ -42,13 +57,11 @@ if ($db_ok) {
   $t3=@$conexion->query("SHOW TABLES LIKE 'categories'");       $has_categories_table=($t3 && $t3->num_rows>0);
 
   if ($has_products) {
-    $c1=@$conexion->query("SHOW COLUMNS FROM products LIKE 'image_url'");   $has_image_url=($c1 && $c1->num_rows>0);
-    $c2=@$conexion->query("SHOW COLUMNS FROM products LIKE 'created_at'");  $has_created_at=($c2 && $c2->num_rows>0);
-    $c3=@$conexion->query("SHOW COLUMNS FROM products LIKE 'category_id'"); $has_category_id=($c3 && $c3->num_rows>0);
+    $has_image_url   = hascol('products','image_url');
+    $has_created_at  = hascol('products','created_at');
+    $has_category_id = hascol('products','category_id');
   }
-  if ($has_variants) {
-    $v1=@$conexion->query("SHOW COLUMNS FROM product_variants LIKE 'price'"); $has_variant_price=($v1 && $v1->num_rows>0);
-  }
+  if ($has_variants) { $has_variant_price = hascol('product_variants','price'); }
 
   if ($has_products) {
     $select = "p.id,p.name"
@@ -63,30 +76,24 @@ if ($db_ok) {
   }
 }
 
-/* ========= Indicador de pedidos nuevos (sin encadenar ->num_rows) ========= */
+/* ========= Contadores rápidos (pill en HERO) ========= */
 $newCount = 0; $envioCount = 0; $retiroCount = 0;
-
 if ($db_ok) {
   // Ventas
   $rs = @$conexion->query("SHOW TABLES LIKE 'sales'");
   $has_sales = ($rs && $rs->num_rows>0);
   if ($has_sales) {
-    $rs = @$conexion->query("SHOW COLUMNS FROM sales LIKE 'status'");
-    $has_status = ($rs && $rs->num_rows>0);
-
-    $rs = @$conexion->query("SHOW COLUMNS FROM sales LIKE 'created_at'");
-    $has_created = ($rs && $rs->num_rows>0);
-
-    $rs = @$conexion->query("SHOW COLUMNS FROM sales LIKE 'shipping_method'");
-    $has_shipmeth = ($rs && $rs->num_rows>0);
+    $has_status  = hascol('sales','status');
+    $has_created = hascol('sales','created_at');
+    $has_shipmeth= hascol('sales','shipping_method');
 
     if ($has_status) {
-      if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE status='new'")) {
+      if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE LOWER(status) IN ('new','pendiente','pending','reservado','hold','unpaid','sin_pago')")) {
         $row=$rs->fetch_assoc(); $newCount += (int)($row['c'] ?? 0);
       }
       if ($has_shipmeth) {
-        if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE status='new' AND shipping_method='envio'"))  { $row=$rs->fetch_assoc(); $envioCount  = (int)($row['c'] ?? 0); }
-        if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE status='new' AND shipping_method='retiro'")) { $row=$rs->fetch_assoc(); $retiroCount = (int)($row['c'] ?? 0); }
+        if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE LOWER(status) IN ('new','pendiente','pending','reservado','hold','unpaid','sin_pago') AND shipping_method='envio'"))  { $row=$rs->fetch_assoc(); $envioCount  = (int)($row['c'] ?? 0); }
+        if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE LOWER(status) IN ('new','pendiente','pending','reservado','hold','unpaid','sin_pago') AND shipping_method='retiro'")) { $row=$rs->fetch_assoc(); $retiroCount = (int)($row['c'] ?? 0); }
       }
     } elseif ($has_created) {
       if ($rs=@$conexion->query("SELECT COUNT(*) c FROM sales WHERE created_at >= NOW() - INTERVAL 2 DAY")) {
@@ -99,18 +106,14 @@ if ($db_ok) {
     }
   }
 
-  // Reservas (opcional)
+  // Reservas (si existiera otra tabla)
   $rs = @$conexion->query("SHOW TABLES LIKE 'reservations'");
   $has_res = ($rs && $rs->num_rows>0);
   if ($has_res) {
-    $rs = @$conexion->query("SHOW COLUMNS FROM reservations LIKE 'status'");
-    $has_rstatus = ($rs && $rs->num_rows>0);
-
-    $rs = @$conexion->query("SHOW COLUMNS FROM reservations LIKE 'created_at'");
-    $has_rcreated = ($rs && $rs->num_rows>0);
-
+    $has_rstatus  = hascol('reservations','status');
+    $has_rcreated = hascol('reservations','created_at');
     if ($has_rstatus) {
-      if ($rs=@$conexion->query("SELECT COUNT(*) c FROM reservations WHERE status='new'")) {
+      if ($rs=@$conexion->query("SELECT COUNT(*) c FROM reservations WHERE LOWER(status) IN ('new','pendiente','pending')")) {
         $row=$rs->fetch_assoc(); $newCount += (int)($row['c'] ?? 0);
       }
     } elseif ($has_rcreated) {
@@ -119,6 +122,59 @@ if ($db_ok) {
       }
     }
   }
+}
+
+/* ========= AVISO con lista de compras online sin confirmar ========= */
+$pending_rows = []; $pending_count = 0;
+if ($db_ok && $has_sales) {
+  $sales_cols = db_cols('sales');
+  $has_origin   = isset($sales_cols['origin']) || isset($sales_cols['origen']);
+  $has_status   = isset($sales_cols['status']) || isset($sales_cols['estado']);
+  $has_createdS = isset($sales_cols['created_at']) || isset($sales_cols['fecha']);
+  $has_total    = isset($sales_cols['total']);
+
+  $name_candidates = array_values(array_intersect(['customer_name','buyer_name','name','cliente'], array_keys($sales_cols)));
+  $name_expr = $name_candidates ? ('COALESCE('.implode(',', array_map(fn($c)=>"s.`$c`",$name_candidates)).')') : "CONCAT('Cliente #', s.id)";
+
+  $ship_candidates = array_values(array_intersect(['shipping_method','delivery_method','tipo_envio'], array_keys($sales_cols)));
+  $ship_expr = $ship_candidates ? ('COALESCE('.implode(',', array_map(fn($c)=>"s.`$c`",$ship_candidates)).')') : "NULL";
+
+  $created_expr = isset($sales_cols['created_at']) ? 's.created_at' : (isset($sales_cols['fecha']) ? 's.fecha' : 'NULL');
+
+  $wheres = [];
+  if ($has_origin) {
+    $wheres[] = "(LOWER(COALESCE(s.origin,s.origen))='online')";
+  }
+  if (isset($sales_cols['status'])) {
+    $type = coltype('sales','status');
+    if (preg_match('~^(tinyint|smallint|int|bigint|decimal|double|float)~',$type)) {
+      $wheres[] = "(s.status IS NULL OR s.status=0)";
+    } else {
+      $wheres[] = "LOWER(s.status) IN ('new','pendiente','pending','reservado','hold','unpaid','sin_pago')";
+    }
+  } elseif (isset($sales_cols['estado'])) {
+    $type = coltype('sales','estado');
+    if (preg_match('~^(tinyint|smallint|int|bigint|decimal|double|float)~',$type)) {
+      $wheres[] = "(s.estado IS NULL OR s.estado=0)";
+    } else {
+      $wheres[] = "LOWER(s.estado) IN ('new','pendiente','pending','reservado','hold','unpaid','sin_pago')";
+    }
+  } else {
+    if ($has_createdS) $wheres[] = "($created_expr >= NOW() - INTERVAL 2 DAY)";
+  }
+  $where = $wheres ? ('WHERE '.implode(' AND ',$wheres)) : '';
+
+  // Conteo
+  $sqlC = "SELECT COUNT(*) c FROM sales s $where";
+  if ($rc=@$conexion->query($sqlC)) { $pending_count = (int)($rc->fetch_assoc()['c'] ?? 0); }
+
+  // Listado corto
+  $sel = "s.id, $name_expr AS buyer, ".($has_total?'s.total':'0')." AS total, $ship_expr AS ship_method";
+  if ($has_status)  { $sel .= ", ".(isset($sales_cols['status'])?'s.status':'s.estado')." AS status"; }
+  if ($has_createdS){ $sel .= ", $created_expr AS created_at"; }
+  $order = $has_createdS ? "$created_expr DESC, s.id DESC" : "s.id DESC";
+  $sqlR = "SELECT $sel FROM sales s $where ORDER BY $order LIMIT 5";
+  if ($rr=@$conexion->query($sqlR)) while($r=$rr->fetch_assoc()) $pending_rows[]=$r;
 }
 
 /* ========= Header ========= */
@@ -148,21 +204,57 @@ $rot_words = [
     .cta{display:inline-block;padding:.6rem 1rem;border:1px solid var(--ring);border-radius:10px;text-decoration:none}
     .container{max-width:1100px;margin:0 auto;padding:0 14px}
     .hero{padding:36px 0;text-align:center}
-
+    .info{background:#142625;border:1px solid #1f6f6a;border-radius:12px;padding:12px;margin:14px 0}
+    .table{width:100%;border-collapse:collapse}
+    .table th,.table td{border-bottom:1px solid var(--ring);padding:8px;text-align:left;font-size:.95rem}
+    /* Rotador */
     .rotator{display:inline-block;position:relative;font-weight:800;letter-spacing:.02em;animation:twinkle 2.4s ease-in-out infinite}
     .rot-out{opacity:.08;filter:blur(1px);transition:opacity .26s linear,filter .26s linear}
     @keyframes twinkle{0%,100%{text-shadow:0 0 0px #fff}50%{text-shadow:0 0 10px rgba(255,255,255,.7),0 0 28px rgba(255,255,255,.25)}}
-    .rotator::after{content:"";position:absolute;inset:-.15em;pointer-events:none;background:
-      radial-gradient(6px 6px at 20% 40%, rgba(255,255,255,.9), transparent 60%),
-      radial-gradient(5px 5px at 70% 30%, rgba(255,255,255,.7), transparent 60%),
-      radial-gradient(4px 4px at 45% 70%, rgba(255,255,255,.6), transparent 60%);
-      mix-blend-mode:screen;animation:spark 3.6s linear infinite;opacity:.7}
-    @keyframes spark{0%{transform:translateX(-6%) translateY(-2%);opacity:.6}50%{transform:translateX(6%) translateY(2%);opacity:.9}100%{transform:translateX(-6%) translateY(-2%);opacity:.6}}
   </style>
 </head>
 <body>
 
   <?php if (file_exists($header_path)) { require $header_path; } ?>
+
+  <!-- AVISO: Compras online sin confirmar -->
+  <div class="container">
+    <?php if ($pending_count>0): ?>
+      <div class="info">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+          <div><b>🔔 Hay <?= (int)$pending_count ?> compra<?= $pending_count>1?'s':'' ?> online para confirmar pago / entrega.</b></div>
+          <div><a class="cta" href="<?= url_public('ventas.php') ?>">Ir a Ventas</a></div>
+        </div>
+        <?php if (!empty($pending_rows)): ?>
+          <div style="margin-top:10px;overflow:auto">
+            <table class="table">
+              <thead><tr>
+                <th>#</th><th>Cliente</th><th>Total</th><th>Entrega</th><th>Estado</th><th>Fecha</th>
+              </tr></thead>
+              <tbody>
+                <?php foreach ($pending_rows as $r): ?>
+                  <tr>
+                    <td><?= (int)$r['id'] ?></td>
+                    <td><?= h($r['buyer'] ?? '—') ?></td>
+                    <td>$ <?= money((float)($r['total'] ?? 0)) ?></td>
+                    <td>
+                      <?php
+                        $m = strtolower(trim((string)($r['ship_method'] ?? '')));
+                        echo $m==='envio' ? '🚚 Envío' : ($m==='retiro' ? '🏬 Retiro' : '—');
+                      ?>
+                    </td>
+                    <td><?= h((string)($r['status'] ?? 'pendiente')) ?></td>
+                    <td><?= h(isset($r['created_at']) ? date('d/m/Y H:i', strtotime($r['created_at'])) : '') ?></td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
+        <?php endif; ?>
+        <div style="opacity:.8;margin-top:6px">Tip: marcá la venta como <i>pagado/completada</i> desde “Ventas”. Si no se confirma dentro de 24h (y tenés reservas activas), el stock se libera solo.</div>
+      </div>
+    <?php endif; ?>
+  </div>
 
   <!-- HERO -->
   <header class="hero">
