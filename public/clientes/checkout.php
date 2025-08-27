@@ -50,6 +50,10 @@ function hascol($table,$col){
   $rs = @$conexion->query("SHOW COLUMNS FROM `$table` LIKE '".$conexion->real_escape_string($col)."'");
   return ($rs && $rs->num_rows>0);
 }
+function coltype($table,$col){
+  $c = db_cols($table);
+  return strtolower($c[$col]['Type'] ?? '');
+}
 function infer_type($v){
   if (is_int($v)) return 'i';
   if (is_float($v)) return 'd';
@@ -103,8 +107,7 @@ function sales_payload($args){
     'shipping_province'=>$args['prov'],'province'=>$args['prov'],'provincia'=>$args['prov'],
     'shipping_postal'=>$args['post'],'postal'=>$args['post'],'cp'=>$args['post'],
     'shipping_notes'=>$args['notes'],'notes'=>$args['notes'],'observaciones'=>$args['notes'],
-    // tracking
-    'status'=>'new','estado'=>'new',
+    // tracking (los seteamos luego según el tipo real de columna)
     'origin'=>'online','origen'=>'online',
     'created_at'=>$now,'fecha'=>$now,
   ];
@@ -119,6 +122,40 @@ function sale_item_payload($sale_id, $it){
     'price_unit'=>(float)$it['price'],'unit_price'=>(float)$it['price'],'precio_unit'=>(float)$it['price'],'price'=>(float)$it['price'],
     'line_total'=>(float)$it['line_total'],'total'=>(float)$it['line_total'],'importe'=>(float)$it['line_total'],
   ];
+}
+
+/* ===== Normalizador de STATUS según esquema real ===== */
+function choose_status_value($method, $table, $col){
+  $type = coltype($table,$col);
+  $unpaid_methods = ['efectivo','transferencia','cuenta_corriente'];
+  $is_unpaid = in_array($method,$unpaid_methods,true);
+
+  // Preferencias por idioma/uso
+  $pref_unpaid = ['pendiente','reservado','pending','hold','new','nuevo'];
+  $pref_paid   = ['pagado','paid','completada','completed','cerrada','closed'];
+
+  // Si es ENUM('...','...')
+  if (str_starts_with($type,'enum(')) {
+    preg_match_all("/'([^']+)'/",$type,$m);
+    $opts = $m[1] ?? [];
+    $prefs = $is_unpaid ? $pref_unpaid : $pref_paid;
+    // Buscar case-insensitive y devolver la opción tal como está en el enum
+    foreach ($prefs as $p) {
+      foreach ($opts as $opt) {
+        if (strcasecmp($p,$opt)===0) return $opt;
+      }
+    }
+    // sino, primera opción del enum
+    return $opts[0] ?? ($is_unpaid ? 'pendiente' : 'pagado');
+  }
+
+  // Si es numérica -> 0/1
+  if (preg_match('~^(tinyint|smallint|int|bigint|decimal|double|float)~',$type)) {
+    return $is_unpaid ? 0 : 1;
+  }
+
+  // Por defecto (varchar/text)
+  return $is_unpaid ? 'pendiente' : 'pagado';
 }
 
 /* ===== Manejo de STOCK y Reservas ===== */
@@ -187,12 +224,11 @@ function release_expired_reservations(){
   }
 }
 
-/* ===== Config pagos (SIN descuentos de tienda online) ===== */
+/* ===== Config pagos ===== */
 $PAY_METHODS = [
   'efectivo'         => ['label'=>'Efectivo'],
   'transferencia'    => ['label'=>'Transferencia'],
   'debito'           => ['label'=>'Débito',  'installments'=>[1=>0]],
-  // Si no querés recargo por cuotas, cambiá los valores a 0
   'credito'          => ['label'=>'Crédito', 'installments'=>[1=>0, 3=>10, 6=>20, 12=>35]],
   'cuenta_corriente' => ['label'=>'Cuenta Corriente'],
 ];
@@ -302,10 +338,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         $items[]=['pid'=>$pid,'vid'=>$vid,'name'=>$nameP,'qty'=>$qty,'price'=>$price,'line_total'=>$lt];
       }
 
-      // Pago (SIN DESCUENTOS en tienda online)
+      // Pago
       $method   = $payment['method'] ?? 'efectivo';
       $cuotas   = (int)($payment['installments'] ?? 1);
-      $discount = 0.0; // sin descuento
+      $discount = 0.0;
       $fee      = 0.0;
       if ($method==='credito' && !empty($PAY_METHODS['credito']['installments'][$cuotas])) {
         $fee = $subtotal * ($PAY_METHODS['credito']['installments'][$cuotas]/100);
@@ -324,7 +360,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         if (($shipping['province']??'')==='')$errors[]='Ingresá la provincia.';
         if (($shipping['postal']??'')==='')  $errors[]='Ingresá el código postal.';
       }
-      $total = max(0.0, $subtotal + $fee + $ship_cost); // sin descuento
+      $total = max(0.0, $subtotal + $fee + $ship_cost);
 
       if (empty($errors)) {
         try {
@@ -368,9 +404,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
           $conexion->begin_transaction();
 
-          // Insert venta (tolerante)
+          // Insert venta (tolerante) + STATUS compatible con el esquema
           $addr=(string)($shipping['address']??''); $city=(string)($shipping['city']??'');
           $prov=(string)($shipping['province']??''); $post=(string)($shipping['postal']??''); $notes=(string)($shipping['notes']??'');
+
           $sale_payload = sales_payload([
             'name'=>$name,'phone'=>$phone,'email'=>$email,
             'method'=>$method,'cuotas'=>$cuotas,
@@ -379,6 +416,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             'addr'=>$addr,'city'=>$city,'prov'=>$prov,'post'=>$post,'notes'=>$notes,
             'total'=>$total
           ]);
+
+          // Ajustar status/estado según tipo real de columna
+          if (hascol('sales','status')) {
+            $sale_payload['status'] = choose_status_value($method,'sales','status');
+          }
+          if (hascol('sales','estado')) {
+            $sale_payload['estado'] = choose_status_value($method,'sales','estado');
+          }
+
           $sale_id = insert_dynamic_row('sales', $sale_payload);
 
           // Ítems + stock + reserva si corresponde
@@ -443,7 +489,7 @@ foreach ($cart as $k => $it) {
   $items[]=['pid'=>$pid,'vid'=>$vid,'name'=>$nameP,'img'=>$img,'qty'=>$qty,'price'=>$price,'line_total'=>$lt];
 }
 
-/* ===== Totales (SIN descuentos) ===== */
+/* ===== Totales ===== */
 $method   = $payment['method'] ?? 'efectivo';
 $cuotas   = (int)($payment['installments'] ?? 1);
 $discount = 0.0;
@@ -451,7 +497,6 @@ $fee      = 0.0;
 if ($method==='credito' && !empty($PAY_METHODS['credito']['installments'][$cuotas])) {
   $fee = $subtotal * ($PAY_METHODS['credito']['installments'][$cuotas]/100);
 }
-
 $ship_method = $shipping['method'] ?? 'retiro';
 $ship_cfg = $SHIPPING[$ship_method] ?? $SHIPPING['retiro'];
 $ship_cost = 0.0;
