@@ -9,14 +9,23 @@ for ($i=0; $i<6; $i++) {
 }
 
 /* ===== Includes tolerantes ===== */
-@if (file_exists($root.'/includes/conn.php')) require $root.'/includes/conn.php';
-@if (file_exists($root.'/includes/helpers.php')) require $root.'/includes/helpers.php';
+if (file_exists($root.'/includes/conn.php')) {
+  require $root.'/includes/conn.php';
+}
+if (file_exists($root.'/includes/helpers.php')) {
+  require $root.'/includes/helpers.php';
+}
 if (file_exists($root.'/includes/page_head.php')) {
   require $root.'/includes/page_head.php';
 } else {
   // Fallback por si no existe page_head.php
   if (!function_exists('page_head')) {
-    function page_head($title,$sub=''){ echo '<header class="container" style="padding:16px 0"><h1 style="margin:0">'.htmlspecialchars($title).'</h1>'.($sub?'<div style="opacity:.8">'.$sub.'</div>':'').'</header>'; }
+    function page_head($title,$sub=''){
+      echo '<header class="container" style="padding:16px 0"><h1 style="margin:0">'
+           .htmlspecialchars($title).'</h1>'
+           .($sub?'<div style="opacity:.8">'.$sub.'</div>':'')
+           .'</header>';
+    }
   }
 }
 
