@@ -2,7 +2,7 @@
 if (session_status()===PHP_SESSION_NONE) session_start();
 
 /* ====== RUTAS: subir dos niveles (clientes -> public -> raíz) ====== */
-$root = dirname(__DIR__, 2); // C:\xampp\htdocs\luna-shop
+$root = dirname(__DIR__, 2);
 require $root.'/includes/conn.php';
 @require $root.'/includes/helpers.php'; // opcional
 
@@ -10,31 +10,24 @@ require $root.'/includes/conn.php';
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
 
-/* ====== BASES WEB ======
-   $PUBLIC_BASE: /public (funciona aunque estemos en /public/clientes)
-   url_public($p): /public/$p
-   urlc($p):       /public/clientes/$p
-*/
+/* ====== BASES WEB ====== */
 $script = $_SERVER['SCRIPT_NAME'] ?? '';
-$dir    = rtrim(dirname($script), '/\\'); // /.../public o /.../public/clientes
+$dir    = rtrim(dirname($script), '/\\');
 $PUBLIC_BASE = (preg_match('~/(clientes)(/|$)~', $dir)) ? rtrim(dirname($dir), '/\\') : $dir;
-
 if (!function_exists('url_public')) {
-  function url_public($path){
-    global $PUBLIC_BASE;
-    $b = rtrim($PUBLIC_BASE, '/'); $p = '/'.ltrim((string)$path, '/');
-    return ($b===''?'':$b).$p;
-  }
+  function url_public($path){ global $PUBLIC_BASE; $b=rtrim($PUBLIC_BASE,'/'); return ($b===''?'':$b).'/'.ltrim((string)$path,'/'); }
 }
-if (!function_exists('urlc')) {
-  function urlc($path){ return url_public('clientes/'.ltrim((string)$path,'/')); }
-}
+if (!function_exists('urlc')) { function urlc($path){ return url_public('clientes/'.ltrim((string)$path,'/')); } }
 
 /* ====== Datos desde BD ====== */
 $db_ok = isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno;
 $has_products=$has_variants=false;
 $has_image_url=$has_created_at=false; $has_variant_price=false;
 $sql_err=''; $prods=null;
+
+function hascol($table,$col){
+  global $conexion; $rs=@$conexion->query("SHOW COLUMNS FROM `$table` LIKE '$col'"); return ($rs && $rs->num_rows>0);
+}
 
 if ($db_ok) {
   $t1=@$conexion->query("SHOW TABLES LIKE 'products'");         $has_products=($t1 && $t1->num_rows>0);
@@ -58,34 +51,19 @@ if ($db_ok) {
   }
 }
 
-/* ====== Palabras para el ROTADOR de promos ====== */
-$promo_words = ['Promos', 'Ofertas', 'Nueva temporada', 'Remeras', 'Pantalones', 'Camperas', 'Denim', 'Accesorios', 'Sale'];
-if ($db_ok && $has_products) {
-  $has_discount = (@$conexion->query("SHOW COLUMNS FROM products LIKE 'discount'")?->num_rows ?? 0) > 0;
-  $has_isoffer  = (@$conexion->query("SHOW COLUMNS FROM products LIKE 'is_offer'")?->num_rows ?? 0) > 0;
-  $has_promolbl = (@$conexion->query("SHOW COLUMNS FROM products LIKE 'promo_label'")?->num_rows ?? 0) > 0;
-
-  if ($has_discount || $has_isoffer || $has_promolbl) {
-    $conds = ["p.active=1"];
-    if ($has_discount)  $conds[] = "p.discount>0";
-    if ($has_isoffer)   $conds[] = "p.is_offer=1";
-    if ($has_promolbl)  $conds[] = "p.promo_label<>''";
-
-    $cond = implode(' OR ', array_slice($conds,1)); // solo las condiciones "promos"
-    $field = $has_promolbl ? "CASE WHEN COALESCE(p.promo_label,'')<>'' THEN p.promo_label ELSE p.name END" : "p.name";
-    $sqlw = "SELECT DISTINCT $field AS label FROM products p WHERE p.active=1 AND (".$cond.") ORDER BY p.id DESC LIMIT 20";
-    if ($rs = @$conexion->query($sqlw)) {
-      $tmp=[]; while($r=$rs->fetch_assoc()){ if(!empty($r['label'])) $tmp[]=$r['label']; }
-      if ($tmp) $promo_words = array_values(array_unique($tmp));
-    }
-  }
-}
-
 /* ====== Carrito en sesión ====== */
 $cart_count = isset($_SESSION['cart_count']) ? (int)$_SESSION['cart_count'] : 0;
 
-/* ====== Header layout ====== */
+/* ====== Palabras rotador (simple) ====== */
+$promo_words = ['Promos','Ofertas','Nueva temporada','Remeras','Pantalones','Camperas','Denim','Accesorios','Sale'];
 $header_path = $root.'/includes/header.php';
+
+/* Columnas variantes detectables */
+$price_col = $has_variants && hascol('product_variants','price') ? 'price' : (hascol('product_variants','precio') ? 'precio' : null);
+$stock_col = $has_variants && hascol('product_variants','stock') ? 'stock' : (hascol('product_variants','existencia') ? 'existencia' : null);
+$size_col  = $has_variants && hascol('product_variants','size')  ? 'size'  : (hascol('product_variants','talla') ? 'talla' : null);
+$color_col = $has_variants && hascol('product_variants','color') ? 'color' : null;
+$sku_col   = $has_variants && hascol('product_variants','sku')   ? 'sku'   : null;
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -97,27 +75,20 @@ $header_path = $root.'/includes/header.php';
   <link rel="icon" type="image/png" href="<?= url_public('assets/img/logo.png') ?>">
   <style>
     .container{max-width:1100px;margin:0 auto;padding:0 14px}
-    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px}
-    .card{background:var(--card,#12141a);border:1px solid var(--ring,#2d323d);border-radius:12px;overflow:hidden}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+    .card{background:var(--card,#12141a);border:1px solid var(--ring,#2d323d);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
     .card .p{padding:12px}
     .badge{display:inline-block;padding:.2rem .5rem;border:1px solid var(--ring);border-radius:.5rem;font-size:.8rem;opacity:.9}
-    .cta{display:inline-block;padding:.5rem .9rem;border:1px solid var(--ring);border-radius:.6rem;text-decoration:none}
+    .cta,.btn{display:inline-block;padding:.5rem .9rem;border:1px solid var(--ring);border-radius:.6rem;text-decoration:none;background:transparent;color:inherit;cursor:pointer}
     header.tienda{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:16px 0}
     .pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--ring);border-radius:999px}
-    nav.breadcrumb a{opacity:.8;text-decoration:none}
-    nav.breadcrumb span{opacity:.5}
     .hero{padding:18px 0 6px;text-align:center}
-
-    /* Rotador con destellos */
-    .rotator{display:inline-block;position:relative;font-weight:800;letter-spacing:.02em;animation:twinkle 2.4s ease-in-out infinite}
-    .rot-out{opacity:.08;filter:blur(1px);transition:opacity .26s linear,filter .26s linear}
-    @keyframes twinkle{0%,100%{text-shadow:0 0 0px #fff}50%{text-shadow:0 0 10px rgba(255,255,255,.7),0 0 28px rgba(255,255,255,.25)}}
-    .rotator::after{content:"";position:absolute;inset:-.15em;pointer-events:none;background:
-      radial-gradient(6px 6px at 20% 40%, rgba(255,255,255,.9), transparent 60%),
-      radial-gradient(5px 5px at 70% 30%, rgba(255,255,255,.7), transparent 60%),
-      radial-gradient(4px 4px at 45% 70%, rgba(255,255,255,.6), transparent 60%);
-      mix-blend-mode:screen;animation:spark 3.6s linear infinite;opacity:.7}
-    @keyframes spark{0%{transform:translateX(-6%) translateY(-2%);opacity:.6}50%{transform:translateX(6%) translateY(2%);opacity:.9}100%{transform:translateX(-6%) translateY(-2%);opacity:.6}}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .input{min-width:120px}
+    .muted{opacity:.8}
+    .price-line{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:.5rem 0}
+    .inline-form{display:grid;gap:8px;grid-template-columns:1fr 1fr}
+    @media (max-width:480px){ .inline-form{grid-template-columns:1fr} }
   </style>
 </head>
 <body>
@@ -125,13 +96,8 @@ $header_path = $root.'/includes/header.php';
   <?php if (file_exists($header_path)) { require $header_path; } ?>
 
   <div class="container">
-
-    <!-- HERO de la tienda con rotador -->
     <section class="hero">
-      <h1 style="margin:0">
-        Ofertas:
-        <span class="rotator" id="promo-rot" aria-live="polite"></span>
-      </h1>
+      <h1 style="margin:0">Ofertas: <span id="promo-rot"></span></h1>
       <div style="opacity:.85;margin-top:6px">Envíos a todo el país · Cambios fáciles · 3 y 6 cuotas</div>
     </section>
 
@@ -141,60 +107,157 @@ $header_path = $root.'/includes/header.php';
     </header>
 
     <?php if($sql_err): ?>
-      <div class="card" style="padding:14px;margin-bottom:12px"><div class="p">
-        <b>❌ Error SQL:</b> <?= h($sql_err) ?>
-      </div></div>
+      <div class="card" style="padding:14px;margin-bottom:12px"><div class="p"><b>❌ Error SQL:</b> <?= h($sql_err) ?></div></div>
     <?php endif; ?>
 
     <?php if($db_ok && $has_products && $prods && $prods->num_rows>0): ?>
       <div class="grid">
         <?php while($p=$prods->fetch_assoc()): ?>
-          <div class="card">
-            <?php
-              $img = ($has_image_url && !empty($p['image_url']))
-                    ? $p['image_url']
-                    : ('https://picsum.photos/seed/'.(int)$p['id'].'/640/480');
-            ?>
-            <a href="<?= urlc('ver.php?id='.(int)$p['id']) ?>">
-              <img src="<?= h($img) ?>" alt="<?= h($p['name']) ?>" loading="lazy" width="640" height="480">
-            </a>
+          <?php
+            $img = ($has_image_url && !empty($p['image_url'])) ? $p['image_url'] : ('https://picsum.photos/seed/'.(int)$p['id'].'/640/480');
+
+            // Variantes del producto
+            $variants = [];
+            if ($has_variants) {
+              $cols = ['id'];
+              $cols[] = $sku_col   ? "$sku_col AS sku"     : "'' AS sku";
+              $cols[] = $size_col  ? "$size_col AS size"   : "'' AS size";
+              $cols[] = $color_col ? "$color_col AS color" : "'' AS color";
+              $cols[] = $price_col ? "$price_col AS price" : "0 AS price";
+              $cols[] = $stock_col ? "$stock_col AS stock" : "0 AS stock";
+              $vsql = "SELECT ".implode(',', $cols)." FROM product_variants WHERE product_id=".(int)$p['id']." ORDER BY id ASC";
+              if ($vrs = @$conexion->query($vsql)) {
+                while($vv=$vrs->fetch_assoc()){
+                  $variants[] = [
+                    'id'=>(int)$vv['id'], 'sku'=>(string)$vv['sku'],
+                    'size'=>(string)$vv['size'], 'color'=>(string)$vv['color'],
+                    'price'=>(float)$vv['price'], 'stock'=>(int)$vv['stock'],
+                  ];
+                }
+              }
+            }
+            $sizes=[]; $colors=[];
+            foreach($variants as $v){ if($v['size']!=='') $sizes[$v['size']]=true; if($v['color']!=='') $colors[$v['color']]=true; }
+            $sizes  = array_keys($sizes);
+            $colors = array_keys($colors);
+          ?>
+          <div class="card" data-prodid="<?= (int)$p['id'] ?>">
+            <a href="<?= urlc('ver.php?id='.(int)$p['id']) ?>"><img src="<?= h($img) ?>" alt="<?= h($p['name']) ?>" loading="lazy" width="640" height="480"></a>
             <div class="p">
               <h3 style="margin:.2rem 0 .4rem"><?= h($p['name']) ?></h3>
-              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+
+              <div class="price-line">
                 <span class="badge">Desde $ <?= money($p['min_price']) ?></span>
-                <a class="cta" href="<?= urlc('ver.php?id='.(int)$p['id']) ?>">Ver</a>
+                <?php if ($variants): ?>
+                  <span class="badge muted" id="price-<?= (int)$p['id'] ?>" style="display:none"></span>
+                  <span class="badge muted" id="stock-<?= (int)$p['id'] ?>" style="display:none"></span>
+                <?php endif; ?>
               </div>
+
+              <?php if ($variants): ?>
+                <form class="inline-form" action="<?= urlc('carrito.php') ?>" method="post" onsubmit="return window._pickAndSubmit(this, <?= (int)$p['id'] ?>)">
+                  <input type="hidden" name="action" value="add">
+                  <input type="hidden" name="product_id" value="<?= (int)$p['id'] ?>">
+                  <input type="hidden" name="variant_id" value="">
+
+                  <label>Talle
+                    <select class="input" name="size" data-role="size">
+                      <option value="">Elegí</option>
+                      <?php foreach($sizes as $sz): ?><option value="<?= h($sz) ?>"><?= h($sz) ?></option><?php endforeach; ?>
+                    </select>
+                  </label>
+                  <label>Color
+                    <select class="input" name="color" data-role="color">
+                      <option value="">Elegí</option>
+                      <?php foreach($colors as $co): ?><option value="<?= h($co) ?>"><?= h($co) ?></option><?php endforeach; ?>
+                    </select>
+                  </label>
+                  <label>Cantidad
+                    <input class="input" type="number" name="qty" value="1" min="1" step="1" data-role="qty">
+                  </label>
+                  <div class="row">
+                    <button type="submit" class="btn" data-role="addbtn" disabled>➕ Agregar</button>
+                    <a class="btn" href="<?= urlc('ver.php?id='.(int)$p['id']) ?>">Ver</a>
+                  </div>
+                  <script type="application/json" id="vdata-<?= (int)$p['id'] ?>"><?= json_encode($variants, JSON_UNESCAPED_UNICODE) ?></script>
+                </form>
+              <?php else: ?>
+                <div class="row"><a class="cta" href="<?= urlc('ver.php?id='.(int)$p['id']) ?>">Ver</a></div>
+              <?php endif; ?>
             </div>
           </div>
         <?php endwhile; ?>
       </div>
     <?php else: ?>
-      <div class="card" style="padding:14px;margin-bottom:12px"><div class="p">
-        Aún no hay productos cargados. Volvé más tarde 🙌
-      </div></div>
+      <div class="card" style="padding:14px;margin-bottom:12px"><div class="p">Aún no hay productos cargados. 🙌</div></div>
     <?php endif; ?>
   </div>
 
-  <!-- Rotador JS (ligero, sin dependencias) -->
   <script>
   (function(){
-    // Palabras provenientes de la BD (o fallback)
-    const WORDS = <?= json_encode(array_values(array_unique($promo_words)), JSON_UNESCAPED_UNICODE) ?>;
+    // Rotador
+    const WORDS = <?= json_encode($promo_words, JSON_UNESCAPED_UNICODE) ?>;
     const el = document.getElementById('promo-rot');
-    if (!el || !WORDS.length) return;
-    let i = 0;
-    const interval = 2200, fade = 260;
-    el.textContent = WORDS[0];
-    setInterval(()=>{
-      el.classList.add('rot-out');
-      setTimeout(()=>{
-        i = (i + 1) % WORDS.length;
-        el.textContent = WORDS[i];
-        el.classList.remove('rot-out');
-      }, fade);
-    }, interval);
+    if (el && WORDS.length) {
+      let i = 0; const interval = 2200, fade = 260;
+      el.textContent = WORDS[0];
+      setInterval(()=>{ el.style.opacity=.08; setTimeout(()=>{ i=(i+1)%WORDS.length; el.textContent=WORDS[i]; el.style.opacity=1; }, fade); }, interval);
+    }
+
+    function findVariant(vlist, size, color){
+      return vlist.find(v => (size? v.size===size : true) && (color? v.color===color : true)) || null;
+    }
+
+    window._pickAndSubmit = function(form, prodId){
+      const sizeSel = form.querySelector('[data-role="size"]');
+      const colorSel= form.querySelector('[data-role="color"]');
+      const qtyIn   = form.querySelector('[data-role="qty"]');
+      const hidVar  = form.querySelector('input[name="variant_id"]');
+      const vjsonEl = document.getElementById('vdata-'+prodId);
+      const priceEl = document.getElementById('price-'+prodId);
+      const stockEl = document.getElementById('stock-'+prodId);
+
+      if (!vjsonEl) return false;
+      const variants = JSON.parse(vjsonEl.textContent || '[]');
+      const size = sizeSel ? sizeSel.value : '';
+      const color= colorSel ? colorSel.value: '';
+      const v = findVariant(variants, size, color);
+      if (!v) { alert('Elegí talle y color disponibles.'); return false; }
+
+      const qty = Math.max(1, parseInt(qtyIn.value || '1', 10));
+      if (v.stock >= 0 && qty > v.stock) { alert('Stock insuficiente. Disponible: '+v.stock); return false; }
+
+      hidVar.value = v.id;
+      if (priceEl){ priceEl.style.display='inline-block'; priceEl.textContent='Var: $ '+Number(v.price||0).toLocaleString('es-AR',{minimumFractionDigits:2, maximumFractionDigits:2}); }
+      if (stockEl){ stockEl.style.display='inline-block'; stockEl.textContent='Stock: '+(v.stock??0); }
+      return true;
+    };
+
+    document.querySelectorAll('form.inline-form').forEach(form=>{
+      const prodCard = form.closest('.card');
+      const prodId   = parseInt(prodCard?.getAttribute('data-prodid')||'0',10);
+      const vjsonEl  = document.getElementById('vdata-'+prodId);
+      if (!vjsonEl) return;
+      const variants = JSON.parse(vjsonEl.textContent || '[]');
+
+      const sizeSel = form.querySelector('[data-role="size"]');
+      const colorSel= form.querySelector('[data-role="color"]');
+      const btnAdd  = form.querySelector('[data-role="addbtn"]');
+      const priceEl = document.getElementById('price-'+prodId);
+      const stockEl = document.getElementById('stock-'+prodId);
+
+      function refresh(){
+        const size = sizeSel ? sizeSel.value : '';
+        const color= colorSel ? colorSel.value : '';
+        const v = findVariant(variants, size, color);
+        if (v){ btnAdd.disabled=false; if (priceEl){priceEl.style.display='inline-block';priceEl.textContent='Var: $ '+Number(v.price||0).toLocaleString('es-AR',{minimumFractionDigits:2, maximumFractionDigits:2});} if (stockEl){stockEl.style.display='inline-block';stockEl.textContent='Stock: '+(v.stock??0);} }
+        else { btnAdd.disabled=true; if(priceEl)priceEl.style.display='none'; if(stockEl)stockEl.style.display='none'; }
+      }
+      if (sizeSel) sizeSel.addEventListener('change', refresh);
+      if (colorSel) colorSel.addEventListener('change', refresh);
+      refresh();
+    });
   })();
   </script>
-
 </body>
 </html>

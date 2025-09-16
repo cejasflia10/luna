@@ -1,184 +1,111 @@
 <?php
 if (session_status()===PHP_SESSION_NONE) session_start();
 
-$root = dirname(__DIR__);
-require $root.'/includes/conn.php';
-require $root.'/includes/helpers.php';
+$root = __DIR__; for ($i=0; $i<6; $i++){ if (file_exists($root.'/includes/conn.php')) break; $root=dirname($root); }
+$has_conn = file_exists($root.'/includes/conn.php');
+if ($has_conn) { require $root.'/includes/conn.php'; }
+@require $root.'/includes/helpers.php';
 
-if (!isset($_SESSION['carrito'])) $_SESSION['carrito'] = [];
+if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
+if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
 
-function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
-function money($n){ return number_format((float)$n, 2, ',', '.'); }
+$script=$_SERVER['SCRIPT_NAME']??''; $dir=rtrim(dirname($script),'/\\');
+$PUBLIC_BASE=(preg_match('~/(clientes)(/|$)~',$dir))? rtrim(dirname($dir),'/\\') : $dir;
+if (!function_exists('url_public')){ function url_public($p){ global $PUBLIC_BASE; $b=rtrim($PUBLIC_BASE,'/'); return ($b===''?'':$b).'/'.ltrim((string)$p,'/'); } }
+if (!function_exists('urlc')){ function urlc($p){ return url_public('clientes/'.ltrim((string)$p,'/')); } }
 
-/* Rutas base desde /clientes */
-$BASE = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/\\');
-if (!function_exists('urlc')) {
-  function urlc($p){ global $BASE; return $BASE.'/'.ltrim($p,'/'); }
-}
+$db_ok = $has_conn && isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno;
+function hascol($t,$c){ global $conexion; $rs=@$conexion->query("SHOW COLUMNS FROM `$t` LIKE '$c'"); return ($rs && $rs->num_rows>0); }
 
-/* Cargar items del carrito */
-$items = [];
-$total = 0.0;
+$has_products = $db_ok && ((@$conexion->query("SHOW TABLES LIKE 'products'")?->num_rows ?? 0) > 0);
+$has_variants = $db_ok && ((@$conexion->query("SHOW TABLES LIKE 'product_variants'")?->num_rows ?? 0) > 0);
+$has_product_price = $has_products && ((@$conexion->query("SHOW COLUMNS FROM products LIKE 'price'")?->num_rows ?? 0) > 0);
+$has_variant_price = $has_variants && ((@$conexion->query("SHOW COLUMNS FROM product_variants LIKE 'price'")?->num_rows ?? 0) > 0);
+$has_image_url = $has_products && ((@$conexion->query("SHOW COLUMNS FROM products LIKE 'image_url'")?->num_rows ?? 0) > 0);
 
-if (!empty($_SESSION['carrito'])) {
-  $ids = array_map('intval', array_keys($_SESSION['carrito']));
-  $in  = implode(',', $ids);
+$price_col = $has_variants && hascol('product_variants','price') ? 'price' : (hascol('product_variants','precio') ? 'precio' : null);
+$size_col  = $has_variants && hascol('product_variants','size')  ? 'size'  : (hascol('product_variants','talla') ? 'talla' : null);
+$color_col = $has_variants && hascol('product_variants','color') ? 'color' : null;
 
-  $sql = "
-    SELECT 
-      p.id, p.name, p.image_url,
-      (SELECT MIN(v.price) FROM product_variants v WHERE v.product_id=p.id) AS price
-    FROM products p
-    WHERE p.active=1 AND p.id IN ($in)
-  ";
-  $res = $conexion->query($sql);
-  if ($res) {
-    while ($r = $res->fetch_assoc()) {
-      $pid = (int)$r['id'];
-      $qty = (int)($_SESSION['carrito'][$pid] ?? 0);
-      if ($qty<=0) continue;
-      $price = (float)($r['price'] ?? 0);
-      $sub   = $price * $qty;
-      $total += $sub;
-      $items[] = [
-        'id'=>$pid,'name'=>$r['name'],'image_url'=>$r['image_url'],
-        'price'=>$price,'qty'=>$qty,'sub'=>$sub
-      ];
+$cart = $_SESSION['cart'] ?? []; $items=[]; $subtotal=0.0;
+foreach ($cart as $row){
+  $pid=(int)($row['product_id']??0); $vid=(int)($row['variant_id']??0); $qty=(int)($row['qty']??0);
+  if ($pid<=0 || $qty<=0) continue;
+  $name='Producto'; $img=''; $price=0.0; $size=''; $color='';
+
+  if ($db_ok && $has_products) {
+    if ($rs=@$conexion->query("SELECT name".($has_image_url?",image_url":"")." FROM products WHERE id={$pid} LIMIT 1")) {
+      if ($pr=$rs->fetch_assoc()){ $name=$pr['name']; $img=$has_image_url?($pr['image_url']??''):$img; }
     }
   }
-}
+  if (!$img) $img='https://picsum.photos/seed/'.$pid.'/640/480';
 
-if (empty($items)) {
-  header('Location: '.urlc('index.php')); exit;
-}
-
-/* Confirmación */
-$okMsg = $errMsg = '';
-if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['confirm'])) {
-  // Datos "cliente" muy básicos para prototipo
-  $nombre = trim($_POST['nombre'] ?? '');
-  $telefono = trim($_POST['telefono'] ?? '');
-  $metodo = $_POST['metodo'] ?? 'efectivo';
-  $reserva = !empty($_POST['reserva']);
-
-  if ($nombre==='') $errMsg = 'Indicá un nombre para identificar tu pedido.';
-  if (!$errMsg) {
-    // Prototipo: guardamos en sesión y vaciamos carrito
-    $_SESSION['last_order'] = [
-      'nombre'=>$nombre,
-      'telefono'=>$telefono,
-      'metodo'=>$metodo,
-      'reserva'=>$reserva,
-      'items'=>$items,
-      'total'=>$total,
-      'created_at'=>date('Y-m-d H:i:s'),
-    ];
-    $_SESSION['carrito'] = [];
-
-    $okMsg = $reserva ? '✅ Reserva realizada. Te contactaremos para coordinar el retiro/pago.'
-                      : '✅ Pedido confirmado. ¡Gracias por tu compra!';
+  if ($db_ok && $has_variants && $vid>0) {
+    $cols=['id']; $cols[]=$price_col?"$price_col AS price":"0 AS price"; $cols[]=$size_col?"$size_col AS size":"'' AS size"; $cols[]=$color_col?"$color_col AS color":"'' AS color";
+    if ($rv=@$conexion->query("SELECT ".implode(',', $cols)." FROM product_variants WHERE id={$vid} AND product_id={$pid} LIMIT 1")) {
+      if ($vv=$rv->fetch_assoc()){ $price=(float)($vv['price']??0); $size=(string)($vv['size']??''); $color=(string)($vv['color']??''); }
+    }
   }
+  if ($price<=0 && $db_ok && $has_variant_price) {
+    if ($rv=@$conexion->query("SELECT MIN(price) AS p FROM product_variants WHERE product_id={$pid}")) if($rr=$rv->fetch_assoc()) $price=(float)($rr['p']??0);
+  }
+  if ($price<=0 && $db_ok && $has_product_price) {
+    if ($rp=@$conexion->query("SELECT price FROM products WHERE id={$pid} LIMIT 1")) if($rr=$rp->fetch_assoc()) $price=(float)($rr['price']??0);
+  }
+
+  $line_total = $price * $qty; $subtotal += $line_total;
+  $attrs=[]; if ($size!=='') $attrs[]="Talle: ".h($size); if ($color!=='') $attrs[]="Color: ".h($color);
+  $items[]=['pid'=>$pid,'vid'=>$vid,'name'=>$name,'img'=>$img,'price'=>$price,'qty'=>$qty,'line_total'=>$line_total,'attrs'=>$attrs];
 }
+
+$total=$subtotal;
+$header_path = $root.'/includes/header.php';
 ?>
-<!DOCTYPE html>
+<!doctype html>
 <html lang="es">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Luna — Pago</title>
-  <link rel="stylesheet" href="../assets/css/styles.css">
-  <link rel="icon" type="image/png" href="../assets/img/logo.png">
+  <title>Pagar — Luna</title>
+  <link rel="stylesheet" href="<?= url_public('assets/css/styles.css') ?>">
+  <link rel="icon" type="image/png" href="<?= url_public('assets/img/logo.png') ?>">
+  <style>
+    .container{max-width:900px;margin:0 auto;padding:0 14px}
+    .card{background:var(--card,#12141a);border:1px solid var(--ring,#2d323d);border-radius:12px;overflow:hidden}
+    .p{padding:12px}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .muted{opacity:.85}
+  </style>
 </head>
 <body>
+  <?php if (file_exists($header_path)) { require $header_path; } ?>
 
-<header class="hero">
   <div class="container">
-    <h1>Checkout</h1>
-    <p>Elegí el método de pago o realizá una reserva sin pagar ahora.</p>
-    <a class="cta" href="<?=urlc('carrito.php')?>">⬅️ Volver al carrito</a>
-  </div>
-</header>
-
-<main class="container">
-  <?php if($okMsg): ?>
-    <div class="kpi"><div class="box"><b>OK</b> <?=h($okMsg)?></div></div>
-
-    <div class="card" style="padding:14px">
-      <div class="p">
-        <h3>Resumen</h3>
-        <ul>
-          <?php foreach($items as $it): ?>
-            <li><?=h($it['qty'])?> × <?=h($it['name'])?> — $ <?=money($it['sub'])?></li>
-          <?php endforeach; ?>
-        </ul>
-        <p><b>Total:</b> $ <?=money($total)?></p>
-
-        <p class="mt-2">
-          <?php if($_SESSION['last_order']['reserva']): ?>
-            Tu reserva quedará activa por <b>48 horas</b>.  
-            Te contactaremos al teléfono: <b><?=h($_SESSION['last_order']['telefono'] ?: '—')?></b>.
-          <?php else: ?>
-            Método elegido: <b><?=h($_SESSION['last_order']['metodo'])?></b>.  
-            Si seleccionaste transferencia:  
-            <br>Alias: <code>luna.shop.tienda</code> — CBU: <code>00000000-0000-00000000</code> (reemplazar por tus datos).
-          <?php endif; ?>
-        </p>
-
-        <a class="cta" href="<?=urlc('index.php')?>">Volver al catálogo</a>
-      </div>
-    </div>
-  <?php else: ?>
-
-    <div class="grid">
-      <div class="card">
-        <div class="p">
-          <h3>Resumen</h3>
-          <div class="table-wrap">
-            <table class="table">
-              <thead><tr><th>Producto</th><th>Cant</th><th class="right">Subtotal</th></tr></thead>
-              <tbody>
-              <?php foreach($items as $it): ?>
-                <tr>
-                  <td><?=h($it['name'])?></td>
-                  <td><?= (int)$it['qty'] ?></td>
-                  <td class="right">$ <?=money($it['sub'])?></td>
-                </tr>
-              <?php endforeach; ?>
-              </tbody>
-              <tfoot>
-                <tr><th colspan="2" class="right">Total</th><th class="right">$ <?=money($total)?></th></tr>
-              </tfoot>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="p">
-          <h3>Datos y pago</h3>
-          <?php if($errMsg): ?><div class="kpi"><div class="box"><b>Error</b> <?=h($errMsg)?></div></div><?php endif; ?>
-          <form method="post">
-            <div class="row">
-              <label>Nombre y apellido <input class="input" name="nombre" required></label>
-              <label>Teléfono <input class="input" name="telefono" placeholder="WhatsApp"></label>
-              <label>Método de pago
-                <select class="input" name="metodo">
-                  <option value="efectivo">Efectivo (al retirar)</option>
-                  <option value="tarjeta">Tarjeta</option>
-                  <option value="transferencia">Transferencia</option>
-                  <option value="mp">Mercado Pago</option>
-                </select>
-              </label>
-              <label>
-                <input type="checkbox" name="reserva" value="1"> Reservar por 48h (sin pagar ahora)
-              </label>
+    <h2>Pago</h2>
+    <?php if (!$items): ?>
+      <div class="card" style="padding:14px;margin-bottom:12px"><div class="p">No hay items.</div></div>
+    <?php else: ?>
+      <div class="card"><div class="p">
+        <?php foreach($items as $it): ?>
+          <div class="row" style="align-items:flex-start;margin-bottom:10px">
+            <img src="<?= h($it['img']) ?>" alt="" width="80" height="80" style="border-radius:8px;object-fit:cover">
+            <div style="flex:1">
+              <div><b><?= h($it['name']) ?></b></div>
+              <?php if ($it['attrs']): ?><div class="muted"><?= implode(' · ', $it['attrs']) ?></div><?php endif; ?>
+              <div class="muted">Precio: $ <?= money($it['price']) ?> — Cant: <?= (int)$it['qty'] ?></div>
             </div>
-            <button type="submit" name="confirm" value="1">Confirmar</button>
-          </form>
-        </div>
-      </div>
-    </div>
+            <div><b>$ <?= money($it['line_total']) ?></b></div>
+          </div>
+          <hr style="border:0;border-top:1px solid var(--ring,#2d323d);margin:8px 0">
+        <?php endforeach; ?>
+        <div style="text-align:right"><b>Total:</b> $ <?= money($total) ?></div>
 
-  <?php endif; ?>
-</main>
+        <div style="margin-top:10px;text-align:right">
+          <a class="cta" href="<?= urlc('checkout.php') ?>">Volver</a>
+          <!-- Aquí iría integración de pago real -->
+          <a class="cta" href="<?= urlc('index.php') ?>">Finalizar</a>
+        </div>
+      </div></div>
+    <?php endif; ?>
+  </div>
 </body>
 </html>
