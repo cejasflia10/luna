@@ -30,6 +30,15 @@ if (!function_exists('urlc')) { // linkear a la tienda
   function urlc($path){ return url_public('clientes/'.ltrim((string)$path,'/')); }
 }
 
+/* ========= Env helper ========= */
+if (!function_exists('envv')) {
+  function envv($k){
+    if (isset($_ENV[$k]) && $_ENV[$k] !== '') return $_ENV[$k];
+    if (isset($_SERVER[$k]) && $_SERVER[$k] !== '') return $_SERVER[$k];
+    $v = getenv($k); return $v!==false ? $v : null;
+  }
+}
+
 /* ========= Utilidades de esquema ========= */
 $db_ok = isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno;
 function db_cols($table){
@@ -45,6 +54,62 @@ function hascol($table,$col){
 function coltype($table,$col){
   $c=db_cols($table); return strtolower($c[$col]['Type'] ?? '');
 }
+
+/* ========= Tabla settings + helpers (para ALIAS/CBU) ========= */
+if ($db_ok) {
+  @$conexion->query("CREATE TABLE IF NOT EXISTS `settings` (
+    `key`   varchar(64) NOT NULL PRIMARY KEY,
+    `value` text NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+}
+function setting_get($key){
+  global $conexion,$db_ok; if(!$db_ok) return null;
+  $stmt=$conexion->prepare("SELECT `value` FROM `settings` WHERE `key`=? LIMIT 1");
+  $stmt->bind_param('s',$key); $stmt->execute();
+  $v=$stmt->get_result()->fetch_column(); $stmt->close();
+  return $v;
+}
+function setting_set($key,$val){
+  global $conexion,$db_ok; if(!$db_ok) return false;
+  $stmt=$conexion->prepare("REPLACE INTO `settings` (`key`,`value`) VALUES (?,?)");
+  $stmt->bind_param('ss',$key,$val); $ok=$stmt->execute(); $stmt->close();
+  return $ok;
+}
+
+/* ========= Flash msgs ========= */
+if (!isset($_SESSION['flash'])) $_SESSION['flash']=[];
+function flash_set($k,$v){ $_SESSION['flash'][$k]=$v; }
+function flash_get($k){ $v=$_SESSION['flash'][$k]??''; unset($_SESSION['flash'][$k]); return $v; }
+
+/* ========= Guardar ALIAS/CBU (POST en index) ========= */
+if (($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && ($_POST['action'] ?? '')==='save_bank') {
+  $ADMIN_PIN = envv('ADMIN_PIN') ?: '';
+  $pin = trim($_POST['admin_pin'] ?? '');
+  if (!$ADMIN_PIN || $pin !== $ADMIN_PIN) {
+    flash_set('err_bank','PIN inválido o no configurado.');
+  } else {
+    $alias = trim($_POST['bank_alias'] ?? '');
+    $cbu   = trim($_POST['bank_cbu'] ?? '');
+    if ($alias==='' && $cbu==='') {
+      flash_set('err_bank','Cargá al menos ALIAS o CBU.');
+    } else {
+      $ok1 = setting_set('bank_alias',$alias);
+      $ok2 = setting_set('bank_cbu',$cbu);
+      if ($ok1 || $ok2) flash_set('ok_bank','Datos bancarios guardados.');
+      else flash_set('err_bank','No se pudo guardar. Verificá la conexión.');
+    }
+  }
+  header('Location: '.( $_SERVER['PHP_SELF'] ?? 'index.php' ).'#conf-banco'); exit;
+}
+
+/* ========= Leer valores actuales (BD > ENV) ========= */
+$BANK_ALIAS = $db_ok ? (setting_get('bank_alias') ?? '') : '';
+$BANK_CBU   = $db_ok ? (setting_get('bank_cbu')   ?? '') : '';
+if ($BANK_ALIAS==='' && envv('BANK_ALIAS')) $BANK_ALIAS = envv('BANK_ALIAS');
+if ($BANK_CBU===''   && envv('BANK_CBU'))   $BANK_CBU   = envv('BANK_CBU');
+
+$ok_bank  = flash_get('ok_bank');
+$err_bank = flash_get('err_bank');
 
 /* ========= Productos (para Novedades) ========= */
 $has_products=$has_variants=$has_categories_table=false;
@@ -77,7 +142,7 @@ if ($db_ok) {
 }
 
 /* ========= Contadores rápidos (pill en HERO) ========= */
-$newCount = 0; $envioCount = 0; $retiroCount = 0;
+$newCount = 0; $envioCount = 0; $retiroCount = 0; $has_sales=false;
 if ($db_ok) {
   // Ventas
   $rs = @$conexion->query("SHOW TABLES LIKE 'sales'");
@@ -291,6 +356,37 @@ $rot_words = [
         <b>❌ Error SQL:</b> <?= h($sql_err) ?>
       </div></div>
     <?php endif; ?>
+
+    <!-- ======= CONFIGURACIÓN ALIAS/CBU (ADMIN) ======= -->
+    <section id="conf-banco" class="card" style="margin:14px 0">
+      <div class="p">
+        <h2 style="margin:.2rem 0 .6rem">💳 Configurar ALIAS / CBU</h2>
+
+        <?php if (!empty($ok_bank)): ?>
+          <div class="badge" style="border-color:#22c55e;color:#22c55e">✔ <?= h($ok_bank) ?></div>
+        <?php endif; ?>
+        <?php if (!empty($err_bank)): ?>
+          <div class="badge" style="border-color:#ef4444;color:#ef4444">❌ <?= h($err_bank) ?></div>
+        <?php endif; ?>
+
+        <form action="<?= h($_SERVER['PHP_SELF'] ?? 'index.php') ?>#conf-banco" method="post" style="display:grid;gap:8px;max-width:560px;margin-top:8px">
+          <input type="hidden" name="action" value="save_bank">
+          <label>ALIAS
+            <input class="input" name="bank_alias" value="<?= h($BANK_ALIAS ?? '') ?>" placeholder="mi.alias.banco">
+          </label>
+          <label>CBU
+            <input class="input" name="bank_cbu" value="<?= h($BANK_CBU ?? '') ?>" placeholder="#########">
+          </label>
+          <label>PIN admin
+            <input class="input" type="password" name="admin_pin" placeholder="ADMIN_PIN">
+          </label>
+          <div>
+            <button class="cta" type="submit">💾 Guardar</button>
+          </div>
+          <div class="badge" style="opacity:.8">El PIN se define en la variable de entorno <code>ADMIN_PIN</code>.</div>
+        </form>
+      </div>
+    </section>
 
     <h2>Novedades</h2>
 
