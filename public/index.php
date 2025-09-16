@@ -26,17 +26,8 @@ if (!function_exists('url_public')) {
     return rtrim($PUBLIC_BASE,'/').'/'.ltrim((string)$path,'/');
   }
 }
-if (!function_exists('urlc')) { // linkear a la tienda
+if (!function_exists('urlc')) { // linkear a la tienda pública
   function urlc($path){ return url_public('clientes/'.ltrim((string)$path,'/')); }
-}
-
-/* ========= Env helper ========= */
-if (!function_exists('envv')) {
-  function envv($k){
-    if (isset($_ENV[$k]) && $_ENV[$k] !== '') return $_ENV[$k];
-    if (isset($_SERVER[$k]) && $_SERVER[$k] !== '') return $_SERVER[$k];
-    $v = getenv($k); return $v!==false ? $v : null;
-  }
 }
 
 /* ========= Utilidades de esquema ========= */
@@ -57,7 +48,6 @@ function coltype($table,$col){
 
 /* ========= Tabla settings (ALIAS/CBU) ========= */
 if ($db_ok) {
-  // `key` entre backticks evita conflicto con palabra reservada
   @$conexion->query("CREATE TABLE IF NOT EXISTS `settings` (
     `key`   varchar(64) NOT NULL PRIMARY KEY,
     `value` text NULL
@@ -75,7 +65,6 @@ function setting_set($key,$val){
   global $conexion,$db_ok; if(!$db_ok) return false;
   $k = $conexion->real_escape_string($key);
   $v = $conexion->real_escape_string($val);
-  // REPLACE crea o actualiza
   $sql = "REPLACE INTO `settings` (`key`,`value`) VALUES ('$k','$v')";
   return !!@$conexion->query($sql);
 }
@@ -85,32 +74,28 @@ if (!isset($_SESSION['flash'])) $_SESSION['flash']=[];
 function flash_set($k,$v){ $_SESSION['flash'][$k]=$v; }
 function flash_get($k){ $v=$_SESSION['flash'][$k]??''; unset($_SESSION['flash'][$k]); return $v; }
 
-/* ========= Guardar ALIAS/CBU (POST en index) ========= */
+/* ========= Guardar ALIAS/CBU (SIN PIN) ========= */
 if (($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && ($_POST['action'] ?? '')==='save_bank') {
-  $ADMIN_PIN = envv('ADMIN_PIN') ?: '';
-  $pin = trim($_POST['admin_pin'] ?? '');
-  if (!$ADMIN_PIN || $pin !== $ADMIN_PIN) {
-    flash_set('err_bank','PIN inválido o no configurado.');
+  if (!$db_ok) {
+    flash_set('err_bank','No hay conexión a la base de datos.');
   } else {
     $alias = trim($_POST['bank_alias'] ?? '');
     $cbu   = trim($_POST['bank_cbu'] ?? '');
     if ($alias==='' && $cbu==='') {
       flash_set('err_bank','Cargá al menos ALIAS o CBU.');
     } else {
-      $ok1 = setting_set('bank_alias',$alias);
-      $ok2 = setting_set('bank_cbu',$cbu);
-      if ($ok1 || $ok2) flash_set('ok_bank','Datos bancarios guardados.');
-      else flash_set('err_bank','No se pudo guardar. Verificá la conexión.');
+      $ok1 = ($alias!=='' ? setting_set('bank_alias',$alias) : true);
+      $ok2 = ($cbu!==''   ? setting_set('bank_cbu',$cbu)     : true);
+      if ($ok1 && $ok2) flash_set('ok_bank','Datos bancarios guardados.');
+      else flash_set('err_bank','No se pudo guardar (verificá permisos/BD).');
     }
   }
   header('Location: '.( $_SERVER['PHP_SELF'] ?? 'index.php' ).'#conf-banco'); exit;
 }
 
-/* ========= Leer valores actuales (BD > ENV) ========= */
+/* ========= Leer valores actuales ========= */
 $BANK_ALIAS = $db_ok ? (setting_get('bank_alias') ?? '') : '';
 $BANK_CBU   = $db_ok ? (setting_get('bank_cbu')   ?? '') : '';
-if ($BANK_ALIAS==='' && envv('BANK_ALIAS')) $BANK_ALIAS = envv('BANK_ALIAS');
-if ($BANK_CBU===''   && envv('BANK_CBU'))   $BANK_CBU   = envv('BANK_CBU');
 
 $ok_bank  = flash_get('ok_bank');
 $err_bank = flash_get('err_bank');
@@ -148,7 +133,6 @@ if ($db_ok) {
 /* ========= Contadores rápidos (pill en HERO) ========= */
 $newCount = 0; $envioCount = 0; $retiroCount = 0; $has_sales=false;
 if ($db_ok) {
-  // Ventas
   $rs = @$conexion->query("SHOW TABLES LIKE 'sales'");
   $has_sales = ($rs && $rs->num_rows>0);
   if ($has_sales) {
@@ -175,7 +159,6 @@ if ($db_ok) {
     }
   }
 
-  // Reservas (si existiera otra tabla)
   $rs = @$conexion->query("SHOW TABLES LIKE 'reservations'");
   $has_res = ($rs && $rs->num_rows>0);
   if ($has_res) {
@@ -233,11 +216,9 @@ if ($db_ok && $has_sales) {
   }
   $where = $wheres ? ('WHERE '.implode(' AND ',$wheres)) : '';
 
-  // Conteo
   $sqlC = "SELECT COUNT(*) c FROM sales s $where";
   if ($rc=@$conexion->query($sqlC)) { $pending_count = (int)($rc->fetch_assoc()['c'] ?? 0); }
 
-  // Listado corto
   $sel = "s.id, $name_expr AS buyer, ".($has_total?'s.total':'0')." AS total, $ship_expr AS ship_method";
   if ($has_status)  { $sel .= ", ".(isset($sales_cols['status'])?'s.status':'s.estado')." AS status"; }
   if ($has_createdS){ $sel .= ", $created_expr AS created_at"; }
@@ -276,7 +257,6 @@ $rot_words = [
     .info{background:#142625;border:1px solid #1f6f6a;border-radius:12px;padding:12px;margin:14px 0}
     .table{width:100%;border-collapse:collapse}
     .table th,.table td{border-bottom:1px solid var(--ring);padding:8px;text-align:left;font-size:.95rem}
-    /* Rotador */
     .rotator{display:inline-block;position:relative;font-weight:800;letter-spacing:.02em;animation:twinkle 2.4s ease-in-out infinite}
     .rot-out{opacity:.08;filter:blur(1px);transition:opacity .26s linear,filter .26s linear}
     @keyframes twinkle{0%,100%{text-shadow:0 0 0px #fff}50%{text-shadow:0 0 10px rgba(255,255,255,.7),0 0 28px rgba(255,255,255,.25)}}
@@ -361,7 +341,7 @@ $rot_words = [
       </div></div>
     <?php endif; ?>
 
-    <!-- ======= CONFIGURACIÓN ALIAS/CBU (ADMIN) ======= -->
+    <!-- ======= CONFIGURACIÓN ALIAS/CBU (SIN PIN) ======= -->
     <section id="conf-banco" class="card" style="margin:14px 0">
       <div class="p">
         <h2 style="margin:.2rem 0 .6rem">💳 Configurar ALIAS / CBU</h2>
@@ -381,13 +361,10 @@ $rot_words = [
           <label>CBU
             <input class="input" name="bank_cbu" value="<?= h($BANK_CBU ?? '') ?>" placeholder="#########">
           </label>
-          <label>PIN admin
-            <input class="input" type="password" name="admin_pin" placeholder="ADMIN_PIN">
-          </label>
           <div>
             <button class="cta" type="submit">💾 Guardar</button>
           </div>
-          <div class="badge" style="opacity:.8">El PIN se define en la variable de entorno <code>ADMIN_PIN</code>.</div>
+          <div class="badge" style="opacity:.8">Estos datos se guardan en la tabla <code>settings</code> de la base.</div>
         </form>
       </div>
     </section>
@@ -432,7 +409,6 @@ $rot_words = [
     <?php endif; ?>
   </main>
 
-  <!-- Rotador JS (ligero, sin dependencias) -->
   <script>
   (function(){
     const WORDS = <?= json_encode($rot_words, JSON_UNESCAPED_UNICODE) ?>;
