@@ -6,9 +6,6 @@ require $root.'/includes/conn.php';
 require $root.'/includes/helpers.php';
 require $root.'/includes/page_head.php';
 
-/* ===== Opcional: ver errores en desarrollo ===== */
-// ini_set('display_errors', '1'); ini_set('display_startup_errors', '1'); error_reporting(E_ALL);
-
 /* ===== Helpers ===== */
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
@@ -75,123 +72,29 @@ function envv($k){
   $v = getenv($k); return $v!==false ? $v : null;
 }
 
-/* ===== Cloudinary (siempre obligatorio) ===== */
+/* ===== Cloudinary obligatorio ===== */
 function cloud_is_enabled(){
   return !!envv('CLOUDINARY_CLOUD_NAME') && !!envv('CLOUDINARY_UPLOAD_PRESET');
 }
 function require_cloud_or_die(){
   if (!cloud_is_enabled()) {
     http_response_code(500);
-    echo "<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Error Cloudinary</title></head><body style='font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:20px'>
-    <h2>❌ Cloudinary no está configurado</h2>
-    <p>Definí las variables <code>CLOUDINARY_CLOUD_NAME</code> y <code>CLOUDINARY_UPLOAD_PRESET</code> (unsigned) en el entorno del servidor.</p>
-    </body></html>";
+    echo "<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Cloudinary requerido</title></head><body style='font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:20px'><h2>❌ Cloudinary no está configurado</h2><p>Definí <code>CLOUDINARY_CLOUD_NAME</code> y <code>CLOUDINARY_UPLOAD_PRESET</code> (unsigned).</p></body></html>";
     exit;
   }
 }
-
-/**
- * Sube $tmp_path a Cloudinary y devuelve secure_url.
- */
-function cloud_upload_image($tmp_path, $mime, $orig_name){
-  $cloud  = envv('CLOUDINARY_CLOUD_NAME');
-  $preset = envv('CLOUDINARY_UPLOAD_PRESET');   // unsigned
-  $folder = envv('CLOUDINARY_FOLDER') ?: 'luna-shop/products';
-
-  if (!$cloud) throw new Exception('Cloudinary no configurado (CLOUDINARY_CLOUD_NAME).');
-
-  $url = "https://api.cloudinary.com/v1_1/$cloud/image/upload";
-  $post = [
-    'file'          => new CURLFile($tmp_path, $mime, $orig_name),
-    'upload_preset' => $preset,
-    'folder'        => $folder,
-  ];
-
-  $ch = curl_init($url);
-  curl_setopt_array($ch, [
-    CURLOPT_POST           => true,
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_POSTFIELDS     => $post,
-  ]);
-  $out  = curl_exec($ch);
-  if ($out === false) { $err = curl_error($ch); curl_close($ch); throw new Exception("Cloudinary cURL: $err"); }
-  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-  curl_close($ch);
-
-  $json = json_decode($out, true);
-  if ($code >= 400 || !isset($json['secure_url'])) {
-    $msg = $json['error']['message'] ?? $out;
-    throw new Exception("Cloudinary: $msg");
-  }
-  return $json['secure_url'];
-}
-
-/* ===== AJAX: subir imagen y devolver URL (siempre nube) ===== */
-if (($_GET['__ajax'] ?? '') === 'cloud_upload') {
-  header('Content-Type: application/json; charset=utf-8');
-  try {
-    require_cloud_or_die(); // corta si no hay Cloudinary
-    if (empty($_FILES['file']['name'])) throw new Exception('No se recibió archivo.');
-    $f = $_FILES['file'];
-    if ($f['error'] !== UPLOAD_ERR_OK) throw new Exception('Error al subir (código '.$f['error'].').');
-
-    $allowed = [
-      'image/jpeg' => '.jpg',
-      'image/png'  => '.png',
-      'image/webp' => '.webp',
-      'image/heic' => '.heic',
-      'image/heif' => '.heif',
-      'image/avif' => '.avif',
-    ];
-    if (!isset($allowed[$f['type']])) throw new Exception('Formato no permitido (JPG/PNG/WEBP/HEIC/HEIF/AVIF).');
-    if ($f['size'] > 6*1024*1024) throw new Exception('Imagen muy pesada (máx 6MB).');
-
-    $secure_url = cloud_upload_image($f['tmp_name'], $f['type'], $f['name']);
-    echo json_encode(['ok'=>true, 'url'=>$secure_url]); exit;
-  } catch (Throwable $e) {
-    http_response_code(400);
-    echo json_encode(['ok'=>false, 'error'=>$e->getMessage()]); exit;
-  }
-}
-
-/* ===== Datos para selects ===== */
-$has_categories = $db_ok && t_exists('categories');
-$cats = null;
-if ($has_categories) $cats = @$conexion->query("SELECT id,name FROM categories WHERE active=1 ORDER BY name ASC");
-
-/* input de medidas si existe alguna columna relacionada */
-$has_measure_input = $db_ok && (hascol('product_variants','measure_text') || hascol('product_variants','medidas'));
 
 /* ===== Alta de compra + creación producto/variante ===== */
 $okMsg=''; $errMsg=''; $created=[];
 if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')==='create_purchase') {
   try {
-    require_cloud_or_die(); // fuerza nube
+    require_cloud_or_die();
     if (!t_exists('products') || !t_exists('product_variants')) throw new Exception('Faltan tablas mínimas: products y/o product_variants.');
 
-    /* Imagen (archivo o URL) SIEMPRE Cloudinary */
+    // ⚠️ SIEMPRE CLOUD: ignoramos $_FILES para no chocar con upload_max_filesize; exigimos URL subida por el front
     $image_url = trim($_POST['image_url'] ?? '');
-    if (!empty($_FILES['image_file']['name'])) {
-      $f = $_FILES['image_file'];
-      if ($f['error']===UPLOAD_ERR_OK) {
-        $allowed = [
-          'image/jpeg' => '.jpg',
-          'image/png'  => '.png',
-          'image/webp' => '.webp',
-          'image/heic' => '.heic',
-          'image/heif' => '.heif',
-          'image/avif' => '.avif',
-        ];
-        if (!isset($allowed[$f['type']]))  throw new Exception('Formato no permitido (JPG/PNG/WEBP/HEIC/HEIF/AVIF).');
-        if ($f['size'] > 6*1024*1024)      throw new Exception('Imagen muy pesada (máx 6MB).');
-
-        $image_url = cloud_upload_image($f['tmp_name'], $f['type'], $f['name']);
-      } elseif ($f['error'] !== UPLOAD_ERR_NO_FILE) {
-        throw new Exception('Error al subir la imagen (código '.$f['error'].').');
-      }
-    }
-    // Si no se subió archivo y no hay URL, permitimos continuar (producto sin imagen) o forzar imagen:
-    // if ($image_url==='') throw new Exception('Subí una imagen para generar la URL.');
+    // Si querés forzar imagen obligatoria, descomentá:
+    // if ($image_url==='') throw new Exception('Subí una imagen (se genera la URL automáticamente).');
 
     /* Datos del formulario */
     $name   = trim($_POST['name'] ?? '');
@@ -293,8 +196,6 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
     $errMsg = '❌ '.$e->getMessage();
   }
 }
-
-/* ===== HTML ===== */
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -317,9 +218,7 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
 
 <?php require $root.'/includes/header.php'; ?>
 
-<?php
-page_head('Cargar compras y fotos', 'Siempre sube a Cloudinary (Render no guarda archivos).');
-?>
+<?php page_head('Cargar compras y fotos', 'Siempre sube directo a Cloudinary (sin límite de PHP/Render).'); ?>
 
 <main class="container">
   <?php if ($okMsg!=='') { ?>
@@ -328,30 +227,25 @@ page_head('Cargar compras y fotos', 'Siempre sube a Cloudinary (Render no guarda
   <?php if ($errMsg!=='') { ?>
     <div class="kpi error"><div class="box"><b>Error</b> <?=h($errMsg)?></div></div>
   <?php } ?>
-
   <?php if (!cloud_is_enabled()) { ?>
-    <div class="kpi error"><div class="box">
-      <b>Cloudinary requerido</b> Configurá <code>CLOUDINARY_CLOUD_NAME</code> y <code>CLOUDINARY_UPLOAD_PRESET</code> (unsigned) en el entorno.
-    </div></div>
+    <div class="kpi error"><div class="box"><b>Cloudinary requerido</b> Definí <code>CLOUDINARY_CLOUD_NAME</code> y <code>CLOUDINARY_UPLOAD_PRESET</code> (unsigned).</div></div>
   <?php } ?>
 
   <h2>➕ Nueva compra</h2>
-  <form method="post" enctype="multipart/form-data" class="card" style="padding:14px" id="purchaseForm">
+  <form method="post" enctype="multipart/form-data" class="card" style="padding:14px" id="purchaseForm" <?= cloud_is_enabled() ? '' : 'onsubmit="return false;"' ?>>
     <input type="hidden" name="__action" value="create_purchase">
 
     <h3>Producto</h3>
     <div class="row">
       <label>Nombre <input class="input" name="name" required placeholder="Ej: Remera Luna"></label>
       <label>Categoría
-        <select class="input" name="category_id" <?= $has_categories ? 'required' : 'disabled' ?>>
+        <select class="input" name="category_id" <?= ($db_ok && t_exists('categories')) ? 'required' : 'disabled' ?>>
           <?php
-            if ($has_categories && $cats && $cats->num_rows>0) {
-              while($cat=$cats->fetch_assoc()){
-                echo '<option value="'.(int)$cat['id'].'">'.h($cat['name']).'</option>';
-              }
-            } else {
-              echo '<option value="">(Creá categorías primero)</option>';
-            }
+            if ($db_ok && t_exists('categories')) {
+              $cats=@$conexion->query("SELECT id,name FROM categories WHERE active=1 ORDER BY name ASC");
+              if($cats && $cats->num_rows>0){ while($cat=$cats->fetch_assoc()){ echo '<option value="'.(int)$cat['id'].'">'.h($cat['name']).'</option>'; } }
+              else { echo '<option value="">(Creá categorías primero)</option>'; }
+            } else { echo '<option value="">(Creá categorías primero)</option>'; }
           ?>
         </select>
       </label>
@@ -361,15 +255,10 @@ page_head('Cargar compras y fotos', 'Siempre sube a Cloudinary (Render no guarda
     <div class="row">
       <label>Imagen (subir desde el celu)
         <input class="input" type="file" id="image_file" name="image_file" accept="image/*" capture="environment" <?= cloud_is_enabled() ? '' : 'disabled' ?>>
-        <div class="hint">
-          <?= cloud_is_enabled()
-              ? 'Apenas elijas la foto, se sube a Cloudinary, se completa la URL y aparece la previsualización.'
-              : 'Cloudinary no configurado. Configuralo para poder subir imágenes.'
-          ?>
-        </div>
+        <div class="hint"><?= cloud_is_enabled() ? 'Al elegir la foto se sube directo a Cloudinary y completa la URL.' : 'Configurar Cloudinary para habilitar subidas.' ?></div>
       </label>
       <label>URL de imagen
-        <input class="input" id="image_url" name="image_url" placeholder="https://… (se completa automáticamente al subir)" readonly>
+        <input class="input" id="image_url" name="image_url" placeholder="https://… (se completa automáticamente)" readonly>
         <div class="note"><?= cloud_is_enabled() ? 'Cloudinary activo ✔' : 'Inactivo ⚠' ?></div>
       </label>
     </div>
@@ -383,7 +272,7 @@ page_head('Cargar compras y fotos', 'Siempre sube a Cloudinary (Render no guarda
       <label>SKU <input class="input" name="sku" placeholder="Opcional"></label>
       <label>Talle <input class="input" name="size" placeholder="S / M / L…"></label>
       <label>Color <input class="input" name="color" placeholder="Negro / Azul…"></label>
-      <label>Medidas <input class="input" name="measure_text" placeholder="Ancho x Largo…" <?= $has_measure_input?'':'disabled' ?>></label>
+      <label>Medidas <input class="input" name="measure_text" placeholder="Ancho x Largo…" <?= ($db_ok && (hascol('product_variants','measure_text')||hascol('product_variants','medidas'))) ? '' : 'disabled' ?>></label>
     </div>
 
     <h3>Compra</h3>
@@ -431,29 +320,61 @@ page_head('Cargar compras y fotos', 'Siempre sube a Cloudinary (Render no guarda
   const urlIn = document.getElementById('image_url');
   const prevW = document.getElementById('imgPreviewWrap');
   const prev  = document.getElementById('imgPreview');
-  const cloudEnabled = <?= cloud_is_enabled() ? 'true' : 'false' ?>;
 
-  async function doUpload(){
-    if (!file.files || !file.files[0]) { return; }
+  // Config Cloudinary para subida directa (expuesto SOLO si usás unsigned preset)
+  const CLOUD = {
+    name: <?= json_encode(envv('CLOUDINARY_CLOUD_NAME')) ?>,
+    preset: <?= json_encode(envv('CLOUDINARY_UPLOAD_PRESET')) ?>,
+    folder: <?= json_encode(envv('CLOUDINARY_FOLDER') ?: 'luna-shop/products') ?>
+  };
+
+  function humanSize(bytes){
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+    return (bytes/1024/1024).toFixed(1) + ' MB';
+  }
+
+  async function uploadDirectToCloudinary(blob){
+    const fd = new FormData();
+    fd.append('file', blob);
+    fd.append('upload_preset', CLOUD.preset);
+    fd.append('folder', CLOUD.folder);
+    const endpoint = `https://api.cloudinary.com/v1_1/${CLOUD.name}/image/upload`;
+    const res = await fetch(endpoint, { method:'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok || !data.secure_url) {
+      throw new Error((data && data.error && data.error.message) ? data.error.message : 'Fallo al subir a Cloudinary');
+    }
+    return data.secure_url;
+  }
+
+  async function handleFile(){
+    if (!file.files || !file.files[0]) return;
+    const f = file.files[0];
+
+    // Límite orientativo del lado cliente (12 MB); Cloudinary soporta más, pero evitamos demoras
+    const MAX = 12 * 1024 * 1024;
+    if (f.size > MAX) {
+      alert('La imagen es muy pesada ('+humanSize(f.size)+'). Elegí otra o reducila (máx ~12MB).');
+      return;
+    }
+
     try{
-      const fd = new FormData();
-      fd.append('file', file.files[0]);
-      const res  = await fetch('?__ajax=cloud_upload', { method:'POST', body: fd });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || 'Error al subir');
-      urlIn.value = data.url;
-      prev.src = data.url;
-      prevW.style.display = 'inline-block';
+      urlIn.value = 'Subiendo…';
+      const url = await uploadDirectToCloudinary(f);
+      urlIn.value = url;
+      try{
+        prev.src = url;
+        prevW.style.display = 'inline-block';
+      }catch(ex){}
     }catch(e){
       alert('Error subiendo a Cloudinary: ' + e.message);
+      urlIn.value = '';
     }
   }
 
   if (file) {
-    file.addEventListener('change', function(){
-      if (!cloudEnabled) return;
-      doUpload();
-    });
+    file.addEventListener('change', handleFile);
   }
 })();
 </script>
