@@ -72,54 +72,66 @@ function envv($k){
   $v = getenv($k); return $v!==false ? $v : null;
 }
 
-/* ===== Cloudinary obligatorio ===== */
+/* ===== Cloudinary requerido ===== */
 function cloud_is_enabled(){
   return !!envv('CLOUDINARY_CLOUD_NAME') && !!envv('CLOUDINARY_UPLOAD_PRESET');
 }
-function require_cloud_or_die(){
-  if (!cloud_is_enabled()) {
-    http_response_code(500);
-    echo "<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Cloudinary requerido</title></head><body style='font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:20px'><h2>❌ Cloudinary no está configurado</h2><p>Definí <code>CLOUDINARY_CLOUD_NAME</code> y <code>CLOUDINARY_UPLOAD_PRESET</code> (unsigned).</p></body></html>";
-    exit;
-  }
-}
 
-/* ===== Alta de compra + creación producto/variante ===== */
+/* ===== Alta de compra + variantes múltiples ===== */
 $okMsg=''; $errMsg=''; $created=[];
 if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')==='create_purchase') {
   try {
-    require_cloud_or_die();
+    if (!cloud_is_enabled()) throw new Exception('Cloudinary no está configurado (CLOUDINARY_CLOUD_NAME / CLOUDINARY_UPLOAD_PRESET).');
     if (!t_exists('products') || !t_exists('product_variants')) throw new Exception('Faltan tablas mínimas: products y/o product_variants.');
 
-    // ⚠️ SIEMPRE CLOUD: ignoramos $_FILES para no chocar con upload_max_filesize; exigimos URL subida por el front
+    /* Imagen: subida directa desde el front, recibimos URL */
     $image_url = trim($_POST['image_url'] ?? '');
-    // Si querés forzar imagen obligatoria, descomentá:
-    // if ($image_url==='') throw new Exception('Subí una imagen (se genera la URL automáticamente).');
 
-    /* Datos del formulario */
+    /* Datos del producto */
     $name   = trim($_POST['name'] ?? '');
     $desc   = trim($_POST['description'] ?? '');
-    $sku    = trim($_POST['sku'] ?? '');
-    $size   = trim($_POST['size'] ?? '');
-    $color  = trim($_POST['color'] ?? '');
-    $meas   = trim($_POST['measure_text'] ?? '');
-    $sale_price = (float)($_POST['sale_price'] ?? 0);
     $catId  = (int)($_POST['category_id'] ?? 0);
+    if ($name==='') throw new Exception('El nombre del producto es obligatorio.');
+    if ($db_ok && t_exists('categories') && $catId<=0) throw new Exception('Seleccioná una categoría.');
 
-    $qty        = (int)($_POST['quantity'] ?? 0);
-    $unit_cost  = (float)($_POST['unit_cost'] ?? 0);
+    /* Variantes (arrays) */
+    $skus   = $_POST['sku'] ?? [];
+    $sizes  = $_POST['size'] ?? [];
+    $colors = $_POST['color'] ?? [];
+    $meass  = $_POST['measure_text'] ?? [];
+    $qtys   = $_POST['quantity'] ?? [];
+    $costs  = $_POST['unit_cost'] ?? [];
+    $prices = $_POST['sale_price'] ?? [];
+
+    // Normalizar a arrays
+    foreach (['skus','sizes','colors','meass','qtys','costs','prices'] as $var) {
+      if (!is_array($$var)) $$var = [];
+    }
+
+    $rows = max(count($sizes), count($colors), count($qtys), count($costs), count($prices));
+    if ($rows < 1) throw new Exception('Agregá al menos una variante (talle/color/cantidad).');
+
+    // Validación y sumatoria total
+    $totalCompra = 0.0; $linhasValidas = 0;
+    for ($i=0; $i<$rows; $i++){
+      $q = (int)($qtys[$i] ?? 0);
+      $c = (float)($costs[$i] ?? 0);
+      $p = (float)($prices[$i] ?? 0);
+      if ($q < 0 || $c < 0 || $p < 0) throw new Exception('Cantidades/costos/precios no pueden ser negativos.');
+      if ($q === 0) continue; // ignorar filas vacías
+      $linhasValidas++;
+      $totalCompra += $q * $c;
+    }
+    if ($linhasValidas === 0) throw new Exception('Cargá cantidad > 0 en al menos una variante.');
+
+    /* Info de compra */
     $supplier   = trim($_POST['supplier'] ?? '');
     $notes      = trim($_POST['notes'] ?? '');
 
-    if ($name==='')                      throw new Exception('El nombre del producto es obligatorio.');
-    if ($has_categories && $catId<=0)    throw new Exception('Seleccioná una categoría.');
-    if ($qty<=0)                         throw new Exception('La cantidad debe ser mayor a cero.');
-    if ($unit_cost<0 || $sale_price<0)   throw new Exception('Costos/precios no pueden ser negativos.');
-
     $conexion->begin_transaction();
 
-    /* SKU para products: si no viene, generamos uno */
-    $sku_for_product = $sku !== '' ? $sku : ('P'.date('ymdHis').'-'.strtoupper(substr(bin2hex(random_bytes(3)),0,6)));
+    // SKU para products (general)
+    $sku_for_product = 'P'.date('ymdHis').'-'.strtoupper(substr(bin2hex(random_bytes(3)),0,6));
 
     /* INSERT products */
     $product_id = insert_filtered('products', [
@@ -131,66 +143,82 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
       'sku'         => $sku_for_product,
     ]);
 
-    /* INSERT product_variants con mapeos */
-    $pv = [
-      'product_id' => $product_id,
-      'sku'        => $sku,
-      'color'      => $color,
-      'price'      => $sale_price,
-      'avg_cost'   => $unit_cost,
-      'stock'      => $qty,
-    ];
-    if (hascol('product_variants','size'))         $pv['size']         = $size;
-    if (hascol('product_variants','talla'))        $pv['talla']        = $size;
-    if (hascol('product_variants','measure_text')) $pv['measure_text'] = $meas;
-    if (hascol('product_variants','medidas'))      $pv['medidas']      = $meas;
-    if (hascol('product_variants','precio'))       $pv['precio']       = $sale_price;
-    if (hascol('product_variants','existencia'))   $pv['existencia']   = $qty;
-    if (hascol('product_variants','average_cost')) $pv['average_cost'] = $unit_cost;
-    if (hascol('product_variants','costo_promedio')) $pv['costo_promedio'] = $unit_cost;
-    if (hascol('product_variants','costo_prom'))     $pv['costo_prom']     = $unit_cost;
-
-    $variant_id = insert_filtered('product_variants', $pv);
-
-    /* Registrar compra si existen tablas */
+    // Registrar compra general si existen las tablas
+    $purchase_id = null;
     if (t_exists('purchases') && t_exists('purchase_items')) {
-      $p_date_col = hascol('purchases','purchased_at') ? 'purchased_at' : (hascol('purchases','created_at') ? 'created_at' : null);
       $pdata = [];
+      $p_date_col = hascol('purchases','purchased_at') ? 'purchased_at' : (hascol('purchases','created_at') ? 'created_at' : null);
       if ($p_date_col) $pdata[$p_date_col] = date('Y-m-d H:i:s');
       if (hascol('purchases','supplier')) $pdata['supplier'] = $supplier;
       if (hascol('purchases','notes'))    $pdata['notes']    = $notes;
       if (hascol('purchases','status'))   $pdata['status']   = 'done';
-      if (hascol('purchases','total'))    $pdata['total']    = $unit_cost * $qty;
-
+      if (hascol('purchases','total'))    $pdata['total']    = $totalCompra;
       $purchase_id = insert_filtered('purchases', $pdata);
+    }
 
-      $pi = ['purchase_id'=>$purchase_id];
-      if (hascol('purchase_items','variant_id')) $pi['variant_id'] = $variant_id;
-      if (hascol('purchase_items','product_id')) $pi['product_id'] = $product_id;
+    /* INSERT de cada variante + item de compra */
+    for ($i=0; $i<$rows; $i++){
+      $size  = trim((string)($sizes[$i] ?? ''));
+      $color = trim((string)($colors[$i] ?? ''));
+      $meas  = trim((string)($meass[$i] ?? ''));
+      $sku   = trim((string)($skus[$i]  ?? ''));
+      $qty   = (int)($qtys[$i]   ?? 0);
+      $cost  = (float)($costs[$i] ?? 0);
+      $price = (float)($prices[$i]?? 0);
 
-      if (hascol('purchase_items','quantity')) $pi['quantity'] = $qty; elseif (hascol('purchase_items','qty')) $pi['qty']=$qty;
+      if ($qty <= 0) continue; // saltar filas vacías
 
-      if (hascol('purchase_items','unit_cost')) $pi['unit_cost']=$unit_cost;
-      if (hascol('purchase_items','cost_unit')) $pi['cost_unit']=$unit_cost;
-      if (hascol('purchase_items','price_unit'))$pi['price_unit']=$unit_cost;
+      $pv = [
+        'product_id' => $product_id,
+        'sku'        => $sku,
+        'color'      => $color,
+        'price'      => $price,
+        'avg_cost'   => $cost,
+        'stock'      => $qty,
+      ];
+      if (hascol('product_variants','size'))         $pv['size']         = $size;
+      if (hascol('product_variants','talla'))        $pv['talla']        = $size;
+      if (hascol('product_variants','measure_text')) $pv['measure_text'] = $meas;
+      if (hascol('product_variants','medidas'))      $pv['medidas']      = $meas;
+      if (hascol('product_variants','precio'))       $pv['precio']       = $price;
+      if (hascol('product_variants','existencia'))   $pv['existencia']   = $qty;
+      if (hascol('product_variants','average_cost')) $pv['average_cost'] = $cost;
+      if (hascol('product_variants','costo_promedio')) $pv['costo_promedio'] = $cost;
+      if (hascol('product_variants','costo_prom'))     $pv['costo_prom']     = $cost;
 
-      if (hascol('purchase_items','subtotal')) $pi['subtotal'] = $unit_cost * $qty;
+      $variant_id = insert_filtered('product_variants', $pv);
 
-      if (hascol('purchase_items','size'))      $pi['size']   = $size;
-      if (hascol('purchase_items','talla'))     $pi['talla']  = $size;
-      if (hascol('purchase_items','measure_text')) $pi['measure_text'] = $meas;
-      if (hascol('purchase_items','medidas'))      $pi['medidas']      = $meas;
+      // purchase_items por variante
+      if ($purchase_id) {
+        $pi = ['purchase_id'=>$purchase_id];
+        if (hascol('purchase_items','variant_id')) $pi['variant_id'] = $variant_id;
+        if (hascol('purchase_items','product_id')) $pi['product_id'] = $product_id;
 
-      foreach (['name'=>$name,'sku'=>$sku,'color'=>$color,'image_url'=>$image_url] as $k=>$v) {
-        if (hascol('purchase_items',$k)) $pi[$k] = $v;
+        if (hascol('purchase_items','quantity')) $pi['quantity'] = $qty; elseif (hascol('purchase_items','qty')) $pi['qty']=$qty;
+
+        if (hascol('purchase_items','unit_cost')) $pi['unit_cost']=$cost;
+        if (hascol('purchase_items','cost_unit')) $pi['cost_unit']=$cost;
+        if (hascol('purchase_items','price_unit'))$pi['price_unit']=$cost;
+
+        if (hascol('purchase_items','subtotal'))  $pi['subtotal'] = $qty * $cost;
+
+        if (hascol('purchase_items','size'))      $pi['size']   = $size;
+        if (hascol('purchase_items','talla'))     $pi['talla']  = $size;
+        if (hascol('purchase_items','measure_text')) $pi['measure_text'] = $meas;
+        if (hascol('purchase_items','medidas'))      $pi['medidas']      = $meas;
+
+        foreach (['name'=>$name,'sku'=>$sku,'color'=>$color,'image_url'=>$image_url] as $k=>$v) {
+          if (hascol('purchase_items',$k)) $pi[$k] = $v;
+        }
+
+        insert_filtered('purchase_items', $pi);
       }
-      insert_filtered('purchase_items', $pi);
     }
 
     $conexion->commit();
 
-    $okMsg = "✅ Compra cargada. Producto y variante creados correctamente.";
-    $created = ['product_id'=>$product_id,'name'=>$name,'image_url'=>$image_url,'sale_price'=>$sale_price,'qty'=>$qty,'unit_cost'=>$unit_cost];
+    $okMsg = "✅ Compra cargada. Producto y variantes creadas correctamente.";
+    $created = ['product_id'=>$product_id,'name'=>$name,'image_url'=>$image_url,'total'=>$totalCompra];
   } catch (Throwable $e) {
     if (isset($conexion) && $conexion instanceof mysqli) { @$conexion->rollback(); }
     $errMsg = '❌ '.$e->getMessage();
@@ -201,24 +229,30 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
 <html lang="es">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Luna — Compras</title>
+  <title>Luna — Compras (Variantes múltiples)</title>
   <link rel="stylesheet" href="<?=url('assets/css/styles.css')?>">
   <link rel="icon" type="image/png" href="<?=url('assets/img/logo.png')?>">
   <style>
     .note{font-size:.9rem;opacity:.8}
     .hint{font-size:.85rem;opacity:.8;margin-top:6px}
-    .btn{display:inline-block;padding:.45rem .8rem;border:1px solid var(--ring,#2d323d);border-radius:.6rem;background:transparent;color:inherit;text-decoration:none;cursor:pointer}
+    .btn{display:inline-block;padding:.55rem .9rem;border:1px solid var(--ring,#2d323d);border-radius:.7rem;background:transparent;color:inherit;text-decoration:none;cursor:pointer}
+    .btn[disabled]{opacity:.6;cursor:not-allowed}
+    .btn.primary{background:#0ea5e9;border-color:#0ea5e9;color:white}
+    .btn.danger{border-color:#c62828;color:#c62828}
     .preview{margin-top:8px;border:1px dashed var(--ring,#2d323d);border-radius:10px;padding:8px;display:inline-block}
-    .kpi .box{border-left:4px solid #2e7d32}
-    .kpi .box b{margin-right:6px}
-    .kpi.error .box{border-left-color:#c62828}
+    .btns-row{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}
+    .variants{width:100%; border-collapse:collapse; margin-top:8px}
+    .variants th,.variants td{border:1px solid var(--ring,#2d323d); padding:6px}
+    .variants th{background:rgba(0,0,0,.06); text-align:left}
+    .input.small{max-width:120px}
+    .input.xs{max-width:90px}
   </style>
 </head>
 <body>
 
 <?php require $root.'/includes/header.php'; ?>
 
-<?php page_head('Cargar compras y fotos', 'Siempre sube directo a Cloudinary (sin límite de PHP/Render).'); ?>
+<?php page_head('Cargar compras y fotos', 'Subida directa a Cloudinary y carga de múltiples talles/variantes.'); ?>
 
 <main class="container">
   <?php if ($okMsg!=='') { ?>
@@ -232,7 +266,7 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
   <?php } ?>
 
   <h2>➕ Nueva compra</h2>
-  <form method="post" enctype="multipart/form-data" class="card" style="padding:14px" id="purchaseForm" <?= cloud_is_enabled() ? '' : 'onsubmit="return false;"' ?>>
+  <form method="post" class="card" style="padding:14px" id="purchaseForm" <?= cloud_is_enabled() ? '' : 'onsubmit="return false;"' ?>>
     <input type="hidden" name="__action" value="create_purchase">
 
     <h3>Producto</h3>
@@ -252,14 +286,19 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
       <label>Descripción <input class="input" name="description" placeholder="Tela, composición, etc."></label>
     </div>
 
+    <h3>Imagen del producto</h3>
     <div class="row">
-      <label>Imagen (subir desde el celu)
-        <input class="input" type="file" id="image_file" name="image_file" accept="image/*" capture="environment" <?= cloud_is_enabled() ? '' : 'disabled' ?>>
-        <div class="hint"><?= cloud_is_enabled() ? 'Al elegir la foto se sube directo a Cloudinary y completa la URL.' : 'Configurar Cloudinary para habilitar subidas.' ?></div>
-      </label>
-      <label>URL de imagen
+      <div class="btns-row">
+        <button type="button" class="btn" id="btnCamera" <?= cloud_is_enabled() ? '' : 'disabled' ?>>📸 Sacar foto</button>
+        <button type="button" class="btn" id="btnGallery" <?= cloud_is_enabled() ? '' : 'disabled' ?>>🖼️ Elegir de galería</button>
+        <span id="upStatus" class="note"></span>
+      </div>
+      <input type="file" id="image_file_camera" accept="image/*" capture="environment" style="display:none">
+      <input type="file" id="image_file_gallery" accept="image/*" style="display:none">
+
+      <label style="margin-top:8px">URL de imagen
         <input class="input" id="image_url" name="image_url" placeholder="https://… (se completa automáticamente)" readonly>
-        <div class="note"><?= cloud_is_enabled() ? 'Cloudinary activo ✔' : 'Inactivo ⚠' ?></div>
+        <div class="note">La misma imagen se aplica a todas las variantes.</div>
       </label>
     </div>
 
@@ -267,28 +306,36 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
       <img id="imgPreview" src="" alt="preview" style="max-width:240px;height:auto;display:block">
     </div>
 
-    <h3 style="margin-top:16px">Variante inicial</h3>
-    <div class="row">
-      <label>SKU <input class="input" name="sku" placeholder="Opcional"></label>
-      <label>Talle <input class="input" name="size" placeholder="S / M / L…"></label>
-      <label>Color <input class="input" name="color" placeholder="Negro / Azul…"></label>
-      <label>Medidas <input class="input" name="measure_text" placeholder="Ancho x Largo…" <?= ($db_ok && (hascol('product_variants','measure_text')||hascol('product_variants','medidas'))) ? '' : 'disabled' ?>></label>
+    <h3 style="margin-top:16px">Variantes a crear</h3>
+    <div class="note">Cargá una fila por talle/color con su cantidad, costo y precio.</div>
+    <table class="variants" id="variantsTable">
+      <thead>
+        <tr>
+          <th>SKU</th>
+          <th>Talle</th>
+          <th>Color</th>
+          <th><?= (t_exists('product_variants') && (hascol('product_variants','measure_text')||hascol('product_variants','medidas'))) ? 'Medidas' : 'Medidas (no disponible)' ?></th>
+          <th>Cantidad</th>
+          <th>Costo unit.</th>
+          <th>Precio venta</th>
+          <th style="width:1%"></th>
+        </tr>
+      </thead>
+      <tbody id="varBody"><!-- filas dinámicas --></tbody>
+    </table>
+    <div style="margin-top:8px" class="btns-row">
+      <button type="button" class="btn" id="btnAddRow">➕ Agregar fila</button>
+      <button type="button" class="btn" id="btnAddSM">S, M, L (rápido)</button>
+      <span class="note" id="sumNote"></span>
     </div>
 
-    <h3>Compra</h3>
+    <h3 style="margin-top:16px">Datos de compra</h3>
     <div class="row">
-      <label>Cantidad <input class="input" name="quantity" type="number" min="1" value="1" required></label>
-      <label>Costo unitario ($) <input class="input" name="unit_cost" type="number" step="0.01" min="0" value="0" required></label>
       <label>Proveedor <input class="input" name="supplier" placeholder="Opcional"></label>
-    </div>
-
-    <h3>Precio de venta</h3>
-    <div class="row">
-      <label>Precio sugerido ($) <input class="input" name="sale_price" type="number" step="0.01" min="0" value="0" required></label>
       <label>Notas <input class="input" name="notes" placeholder="Opcional (lote, condición)"></label>
     </div>
 
-    <button type="submit" class="btn" <?= cloud_is_enabled() ? '' : 'disabled' ?>>Guardar compra</button>
+    <button type="submit" class="btn primary" <?= cloud_is_enabled() ? '' : 'disabled' ?>>Guardar compra</button>
   </form>
 
   <?php if (!empty($created)) { ?>
@@ -303,9 +350,7 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
         <img src="<?= h($img) ?>" alt="<?= h($created['name']) ?>" loading="lazy" width="640" height="480">
         <div class="p">
           <h3><?= h($created['name']) ?></h3>
-          <span class="badge">Stock +<?= (int)$created['qty'] ?></span>
-          <span class="badge">Costo $ <?= money($created['unit_cost']) ?></span>
-          <span class="badge">Venta $ <?= money($created['sale_price']) ?></span>
+          <span class="badge">Total compra $ <?= money($created['total'] ?? 0) ?></span>
         </div>
       </div>
     </div>
@@ -316,12 +361,16 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
 
 <script>
 (function(){
-  const file  = document.getElementById('image_file');
-  const urlIn = document.getElementById('image_url');
-  const prevW = document.getElementById('imgPreviewWrap');
-  const prev  = document.getElementById('imgPreview');
+  /* ======= Cloudinary Direct Upload (unsigned) ======= */
+  const btnCam = document.getElementById('btnCamera');
+  const btnGal = document.getElementById('btnGallery');
+  const inCam  = document.getElementById('image_file_camera');
+  const inGal  = document.getElementById('image_file_gallery');
+  const urlIn  = document.getElementById('image_url');
+  const prevW  = document.getElementById('imgPreviewWrap');
+  const prev   = document.getElementById('imgPreview');
+  const st     = document.getElementById('upStatus');
 
-  // Config Cloudinary para subida directa (expuesto SOLO si usás unsigned preset)
   const CLOUD = {
     name: <?= json_encode(envv('CLOUDINARY_CLOUD_NAME')) ?>,
     preset: <?= json_encode(envv('CLOUDINARY_UPLOAD_PRESET')) ?>,
@@ -348,34 +397,86 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
     return data.secure_url;
   }
 
-  async function handleFile(){
-    if (!file.files || !file.files[0]) return;
-    const f = file.files[0];
-
-    // Límite orientativo del lado cliente (12 MB); Cloudinary soporta más, pero evitamos demoras
+  async function handleFiles(input){
+    if (!input.files || !input.files[0]) return;
+    const f = input.files[0];
     const MAX = 12 * 1024 * 1024;
-    if (f.size > MAX) {
-      alert('La imagen es muy pesada ('+humanSize(f.size)+'). Elegí otra o reducila (máx ~12MB).');
-      return;
-    }
-
+    if (f.size > MAX) { alert('La imagen es muy pesada ('+humanSize(f.size)+'). Máx ~12MB.'); input.value=''; return; }
     try{
+      if (st) st.textContent = 'Subiendo…';
       urlIn.value = 'Subiendo…';
       const url = await uploadDirectToCloudinary(f);
       urlIn.value = url;
-      try{
-        prev.src = url;
-        prevW.style.display = 'inline-block';
-      }catch(ex){}
+      prev.src = url;
+      prevW.style.display = 'inline-block';
+      if (st) st.textContent = 'Listo ✔';
     }catch(e){
+      if (st) st.textContent = '';
       alert('Error subiendo a Cloudinary: ' + e.message);
       urlIn.value = '';
+    }finally{
+      input.value = '';
     }
   }
 
-  if (file) {
-    file.addEventListener('change', handleFile);
+  if (btnCam) btnCam.addEventListener('click', ()=> inCam && inCam.click());
+  if (btnGal) btnGal.addEventListener('click', ()=> inGal && inGal.click());
+  if (inCam)  inCam.addEventListener('change', ()=> handleFiles(inCam));
+  if (inGal)  inGal.addEventListener('change', ()=> handleFiles(inGal));
+
+  /* ======= Variantes dinámicas ======= */
+  const varBody = document.getElementById('varBody');
+  const btnAdd  = document.getElementById('btnAddRow');
+  const btnSM   = document.getElementById('btnAddSM');
+  const sumNote = document.getElementById('sumNote');
+
+  function rowTemplate(values={}){
+    const canMeasure = true; // el input existe; si la tabla no lo tiene en BD será ignorado por el backend
+    return `
+      <tr>
+        <td><input class="input small" name="sku[]" placeholder="Opcional" value="${values.sku||''}"></td>
+        <td><input class="input xs" name="size[]" placeholder="S/M/L" value="${values.size||''}"></td>
+        <td><input class="input xs" name="color[]" placeholder="Color" value="${values.color||''}"></td>
+        <td><input class="input small" name="measure_text[]" placeholder="Ancho x Largo" value="${values.measure_text||''}"></td>
+        <td><input class="input xs" name="quantity[]" type="number" min="0" step="1" value="${values.quantity??0}"></td>
+        <td><input class="input xs" name="unit_cost[]" type="number" min="0" step="0.01" value="${values.unit_cost??0}"></td>
+        <td><input class="input xs" name="sale_price[]" type="number" min="0" step="0.01" value="${values.sale_price??0}"></td>
+        <td><button type="button" class="btn danger btn-del">✖</button></td>
+      </tr>
+    `;
   }
+
+  function addRow(values) {
+    const tmp = document.createElement('tbody');
+    tmp.innerHTML = rowTemplate(values);
+    const tr = tmp.firstElementChild;
+    varBody.appendChild(tr);
+    tr.querySelector('.btn-del').addEventListener('click', () => {
+      tr.remove(); updateSum();
+    });
+    updateSum();
+  }
+
+  function updateSum(){
+    let total = 0;
+    varBody.querySelectorAll('tr').forEach(tr=>{
+      const q = parseFloat(tr.querySelector('[name="quantity[]"]').value||'0');
+      const c = parseFloat(tr.querySelector('[name="unit_cost[]"]').value||'0');
+      if (q>0 && c>=0) total += q*c;
+    });
+    sumNote.textContent = 'Total (estimado): $ ' + total.toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
+  }
+
+  if (btnAdd) btnAdd.addEventListener('click', ()=> addRow({quantity:1}));
+  if (btnSM)  btnSM.addEventListener('click', ()=>{
+    ['S','M','L'].forEach(sz=> addRow({size:sz, quantity:1}));
+  });
+
+  // Fila inicial
+  addRow({quantity:1});
+  varBody.addEventListener('input', (e)=>{
+    if (e.target && (e.target.name==='quantity[]' || e.target.name==='unit_cost[]')) updateSum();
+  });
 })();
 </script>
 </body>
