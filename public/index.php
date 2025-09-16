@@ -55,8 +55,9 @@ function coltype($table,$col){
   $c=db_cols($table); return strtolower($c[$col]['Type'] ?? '');
 }
 
-/* ========= Tabla settings + helpers (para ALIAS/CBU) ========= */
+/* ========= Tabla settings (ALIAS/CBU) ========= */
 if ($db_ok) {
+  // `key` entre backticks evita conflicto con palabra reservada
   @$conexion->query("CREATE TABLE IF NOT EXISTS `settings` (
     `key`   varchar(64) NOT NULL PRIMARY KEY,
     `value` text NULL
@@ -64,16 +65,19 @@ if ($db_ok) {
 }
 function setting_get($key){
   global $conexion,$db_ok; if(!$db_ok) return null;
-  $stmt=$conexion->prepare("SELECT `value` FROM `settings` WHERE `key`=? LIMIT 1");
-  $stmt->bind_param('s',$key); $stmt->execute();
-  $v=$stmt->get_result()->fetch_column(); $stmt->close();
-  return $v;
+  $k = $conexion->real_escape_string($key);
+  $sql = "SELECT `value` FROM `settings` WHERE `key`='$k' LIMIT 1";
+  $rs = @$conexion->query($sql);
+  if ($rs && $rs->num_rows>0) { $row=$rs->fetch_row(); return $row[0]; }
+  return null;
 }
 function setting_set($key,$val){
   global $conexion,$db_ok; if(!$db_ok) return false;
-  $stmt=$conexion->prepare("REPLACE INTO `settings` (`key`,`value`) VALUES (?,?)");
-  $stmt->bind_param('ss',$key,$val); $ok=$stmt->execute(); $stmt->close();
-  return $ok;
+  $k = $conexion->real_escape_string($key);
+  $v = $conexion->real_escape_string($val);
+  // REPLACE crea o actualiza
+  $sql = "REPLACE INTO `settings` (`key`,`value`) VALUES ('$k','$v')";
+  return !!@$conexion->query($sql);
 }
 
 /* ========= Flash msgs ========= */
