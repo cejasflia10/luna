@@ -6,6 +6,9 @@ require $root.'/includes/conn.php';
 require $root.'/includes/helpers.php';
 require $root.'/includes/page_head.php';
 
+/* ===== Opcional: ver errores en desarrollo ===== */
+// ini_set('display_errors', '1'); ini_set('display_startup_errors', '1'); error_reporting(E_ALL);
+
 /* ===== Helpers ===== */
 if (!function_exists('h'))     { function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('money')) { function money($n){ return number_format((float)$n, 2, ',', '.'); } }
@@ -65,25 +68,34 @@ function insert_filtered($table, $data){
   $id=$stmt->insert_id; $stmt->close(); return $id;
 }
 
-/* ===== Env robusto ===== */
+/* ===== Env ===== */
 function envv($k){
   if (isset($_ENV[$k]) && $_ENV[$k] !== '') return $_ENV[$k];
   if (isset($_SERVER[$k]) && $_SERVER[$k] !== '') return $_SERVER[$k];
   $v = getenv($k); return $v!==false ? $v : null;
 }
 
-/* ===== Cloudinary uploader ===== */
+/* ===== Cloudinary (siempre obligatorio) ===== */
 function cloud_is_enabled(){
   return !!envv('CLOUDINARY_CLOUD_NAME') && !!envv('CLOUDINARY_UPLOAD_PRESET');
 }
+function require_cloud_or_die(){
+  if (!cloud_is_enabled()) {
+    http_response_code(500);
+    echo "<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Error Cloudinary</title></head><body style='font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:20px'>
+    <h2>❌ Cloudinary no está configurado</h2>
+    <p>Definí las variables <code>CLOUDINARY_CLOUD_NAME</code> y <code>CLOUDINARY_UPLOAD_PRESET</code> (unsigned) en el entorno del servidor.</p>
+    </body></html>";
+    exit;
+  }
+}
 
 /**
- * Sube $tmp_path a Cloudinary (unsigned si hay UPLOAD_PRESET).
- * Devuelve secure_url (https) o lanza Exception.
+ * Sube $tmp_path a Cloudinary y devuelve secure_url.
  */
 function cloud_upload_image($tmp_path, $mime, $orig_name){
   $cloud  = envv('CLOUDINARY_CLOUD_NAME');
-  $preset = envv('CLOUDINARY_UPLOAD_PRESET');   // unsigned (recomendado)
+  $preset = envv('CLOUDINARY_UPLOAD_PRESET');   // unsigned
   $folder = envv('CLOUDINARY_FOLDER') ?: 'luna-shop/products';
 
   if (!$cloud) throw new Exception('Cloudinary no configurado (CLOUDINARY_CLOUD_NAME).');
@@ -114,16 +126,24 @@ function cloud_upload_image($tmp_path, $mime, $orig_name){
   return $json['secure_url'];
 }
 
-/* ===== AJAX: subir imagen y devolver URL ===== */
+/* ===== AJAX: subir imagen y devolver URL (siempre nube) ===== */
 if (($_GET['__ajax'] ?? '') === 'cloud_upload') {
   header('Content-Type: application/json; charset=utf-8');
   try {
-    if (!cloud_is_enabled()) throw new Exception('Cloudinary no está configurado.');
+    require_cloud_or_die(); // corta si no hay Cloudinary
     if (empty($_FILES['file']['name'])) throw new Exception('No se recibió archivo.');
     $f = $_FILES['file'];
     if ($f['error'] !== UPLOAD_ERR_OK) throw new Exception('Error al subir (código '.$f['error'].').');
-    $allowed = ['image/jpeg'=>'.jpg','image/png'=>'.png','image/webp'=>'.webp'];
-    if (!isset($allowed[$f['type']])) throw new Exception('Formato no permitido (JPG/PNG/WEBP).');
+
+    $allowed = [
+      'image/jpeg' => '.jpg',
+      'image/png'  => '.png',
+      'image/webp' => '.webp',
+      'image/heic' => '.heic',
+      'image/heif' => '.heif',
+      'image/avif' => '.avif',
+    ];
+    if (!isset($allowed[$f['type']])) throw new Exception('Formato no permitido (JPG/PNG/WEBP/HEIC/HEIF/AVIF).');
     if ($f['size'] > 6*1024*1024) throw new Exception('Imagen muy pesada (máx 6MB).');
 
     $secure_url = cloud_upload_image($f['tmp_name'], $f['type'], $f['name']);
@@ -143,35 +163,35 @@ if ($has_categories) $cats = @$conexion->query("SELECT id,name FROM categories W
 $has_measure_input = $db_ok && (hascol('product_variants','measure_text') || hascol('product_variants','medidas'));
 
 /* ===== Alta de compra + creación producto/variante ===== */
-$okMsg=$errMsg=''; $created=[];
+$okMsg=''; $errMsg=''; $created=[];
 if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')==='create_purchase') {
   try {
+    require_cloud_or_die(); // fuerza nube
     if (!t_exists('products') || !t_exists('product_variants')) throw new Exception('Faltan tablas mínimas: products y/o product_variants.');
 
-    /* Imagen (archivo o URL) con soporte Cloudinary automático */
+    /* Imagen (archivo o URL) SIEMPRE Cloudinary */
     $image_url = trim($_POST['image_url'] ?? '');
     if (!empty($_FILES['image_file']['name'])) {
       $f = $_FILES['image_file'];
       if ($f['error']===UPLOAD_ERR_OK) {
-        $allowed = ['image/jpeg'=>'.jpg','image/png'=>'.png','image/webp'=>'.webp'];
-        if (!isset($allowed[$f['type']]))  throw new Exception('Formato no permitido (JPG/PNG/WEBP).');
+        $allowed = [
+          'image/jpeg' => '.jpg',
+          'image/png'  => '.png',
+          'image/webp' => '.webp',
+          'image/heic' => '.heic',
+          'image/heif' => '.heif',
+          'image/avif' => '.avif',
+        ];
+        if (!isset($allowed[$f['type']]))  throw new Exception('Formato no permitido (JPG/PNG/WEBP/HEIC/HEIF/AVIF).');
         if ($f['size'] > 6*1024*1024)      throw new Exception('Imagen muy pesada (máx 6MB).');
 
-        if (cloud_is_enabled()) {
-          $image_url = cloud_upload_image($f['tmp_name'], $f['type'], $f['name']);
-        } else {
-          $baseDir   = $root.'/public/uploads';
-          $subDir    = date('Y').'/'.date('m');
-          $targetDir = $baseDir.'/'.$subDir;
-          if (!is_dir($targetDir) && !@mkdir($targetDir, 0777, true)) throw new Exception('No se pudo crear la carpeta de uploads.');
-          $nameFile  = bin2hex(random_bytes(8)).$allowed[$f['type']];
-          if (!@move_uploaded_file($f['tmp_name'], $targetDir.'/'.$nameFile)) throw new Exception('No se pudo guardar la imagen.');
-          $image_url = 'uploads/'.$subDir.'/'.$nameFile;
-        }
+        $image_url = cloud_upload_image($f['tmp_name'], $f['type'], $f['name']);
       } elseif ($f['error'] !== UPLOAD_ERR_NO_FILE) {
         throw new Exception('Error al subir la imagen (código '.$f['error'].').');
       }
     }
+    // Si no se subió archivo y no hay URL, permitimos continuar (producto sin imagen) o forzar imagen:
+    // if ($image_url==='') throw new Exception('Subí una imagen para generar la URL.');
 
     /* Datos del formulario */
     $name   = trim($_POST['name'] ?? '');
@@ -273,6 +293,8 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
     $errMsg = '❌ '.$e->getMessage();
   }
 }
+
+/* ===== HTML ===== */
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -285,8 +307,10 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
     .note{font-size:.9rem;opacity:.8}
     .hint{font-size:.85rem;opacity:.8;margin-top:6px}
     .btn{display:inline-block;padding:.45rem .8rem;border:1px solid var(--ring,#2d323d);border-radius:.6rem;background:transparent;color:inherit;text-decoration:none;cursor:pointer}
-    .btn[disabled]{opacity:.6;cursor:not-allowed}
     .preview{margin-top:8px;border:1px dashed var(--ring,#2d323d);border-radius:10px;padding:8px;display:inline-block}
+    .kpi .box{border-left:4px solid #2e7d32}
+    .kpi .box b{margin-right:6px}
+    .kpi.error .box{border-left-color:#c62828}
   </style>
 </head>
 <body>
@@ -294,12 +318,22 @@ if ($db_ok && $_SERVER['REQUEST_METHOD']==='POST' && ($_POST['__action']??'')===
 <?php require $root.'/includes/header.php'; ?>
 
 <?php
-page_head('Cargar compras y fotos', 'Subí la foto (Cloud) o URL, cargá costo/cantidad y fijá el precio de venta.');
+page_head('Cargar compras y fotos', 'Siempre sube a Cloudinary (Render no guarda archivos).');
 ?>
 
 <main class="container">
-  <?php if($okMsg): ?><div class="kpi"><div class="box"><b>OK</b> <?=h($okMsg)?></div></div><?php endif; ?>
-  <?php if($errMsg): ?><div class="kpi"><div class="box"><b>Error</b> <?=h($errMsg)?></div></div><?php endif; ?>
+  <?php if ($okMsg!=='') { ?>
+    <div class="kpi"><div class="box"><b>OK</b> <?=h($okMsg)?></div></div>
+  <?php } ?>
+  <?php if ($errMsg!=='') { ?>
+    <div class="kpi error"><div class="box"><b>Error</b> <?=h($errMsg)?></div></div>
+  <?php } ?>
+
+  <?php if (!cloud_is_enabled()) { ?>
+    <div class="kpi error"><div class="box">
+      <b>Cloudinary requerido</b> Configurá <code>CLOUDINARY_CLOUD_NAME</code> y <code>CLOUDINARY_UPLOAD_PRESET</code> (unsigned) en el entorno.
+    </div></div>
+  <?php } ?>
 
   <h2>➕ Nueva compra</h2>
   <form method="post" enctype="multipart/form-data" class="card" style="padding:14px" id="purchaseForm">
@@ -310,11 +344,15 @@ page_head('Cargar compras y fotos', 'Subí la foto (Cloud) o URL, cargá costo/c
       <label>Nombre <input class="input" name="name" required placeholder="Ej: Remera Luna"></label>
       <label>Categoría
         <select class="input" name="category_id" <?= $has_categories ? 'required' : 'disabled' ?>>
-          <?php if($has_categories && $cats && $cats->num_rows>0): while($cat=$cats->fetch_assoc()): ?>
-            <option value="<?=$cat['id']?>"><?=h($cat['name'])?></option>
-          <?php endwhile; else: ?>
-            <option value="">(Creá categorías primero)</option>
-          <?php endif; ?>
+          <?php
+            if ($has_categories && $cats && $cats->num_rows>0) {
+              while($cat=$cats->fetch_assoc()){
+                echo '<option value="'.(int)$cat['id'].'">'.h($cat['name']).'</option>';
+              }
+            } else {
+              echo '<option value="">(Creá categorías primero)</option>';
+            }
+          ?>
         </select>
       </label>
       <label>Descripción <input class="input" name="description" placeholder="Tela, composición, etc."></label>
@@ -322,18 +360,18 @@ page_head('Cargar compras y fotos', 'Subí la foto (Cloud) o URL, cargá costo/c
 
     <div class="row">
       <label>Imagen (subir desde el celu)
-        <input class="input" type="file" id="image_file" name="image_file" accept="image/*" capture="environment">
-        <div class="hint">Tocá <b>Subir a la nube</b> para generar la URL y ver la previsualización.</div>
+        <input class="input" type="file" id="image_file" name="image_file" accept="image/*" capture="environment" <?= cloud_is_enabled() ? '' : 'disabled' ?>>
+        <div class="hint">
+          <?= cloud_is_enabled()
+              ? 'Apenas elijas la foto, se sube a Cloudinary, se completa la URL y aparece la previsualización.'
+              : 'Cloudinary no configurado. Configuralo para poder subir imágenes.'
+          ?>
+        </div>
       </label>
       <label>URL de imagen
-        <input class="input" id="image_url" name="image_url" placeholder="https://… (se completa cuando subís a la nube)">
-        <div class="note"><?= cloud_is_enabled() ? 'Cloudinary activo: se guardan en la nube.' : 'Cloudinary NO configurado: se guardan localmente (se pierden al redeploy).' ?></div>
+        <input class="input" id="image_url" name="image_url" placeholder="https://… (se completa automáticamente al subir)" readonly>
+        <div class="note"><?= cloud_is_enabled() ? 'Cloudinary activo ✔' : 'Inactivo ⚠' ?></div>
       </label>
-    </div>
-
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:-6px">
-      <button type="button" class="btn" id="btnCloud" <?= cloud_is_enabled() ? '' : 'disabled' ?>>☁️ Subir a la nube (crear URL)</button>
-      <span id="upStatus" class="note"></span>
     </div>
 
     <div id="imgPreviewWrap" class="preview" style="display:none">
@@ -361,10 +399,10 @@ page_head('Cargar compras y fotos', 'Subí la foto (Cloud) o URL, cargá costo/c
       <label>Notas <input class="input" name="notes" placeholder="Opcional (lote, condición)"></label>
     </div>
 
-    <button type="submit" class="btn">Guardar compra</button>
+    <button type="submit" class="btn" <?= cloud_is_enabled() ? '' : 'disabled' ?>>Guardar compra</button>
   </form>
 
-  <?php if($created): ?>
+  <?php if (!empty($created)) { ?>
     <h2 class="mt-4">Vista previa</h2>
     <div class="grid">
       <div class="card">
@@ -382,43 +420,41 @@ page_head('Cargar compras y fotos', 'Subí la foto (Cloud) o URL, cargá costo/c
         </div>
       </div>
     </div>
-  <?php endif; ?>
+  <?php } ?>
 </main>
 
 <?php require $root.'/includes/footer.php'; ?>
 
 <script>
 (function(){
-  const btn   = document.getElementById('btnCloud');
   const file  = document.getElementById('image_file');
   const urlIn = document.getElementById('image_url');
-  const st    = document.getElementById('upStatus');
   const prevW = document.getElementById('imgPreviewWrap');
   const prev  = document.getElementById('imgPreview');
-  if (!btn) return;
+  const cloudEnabled = <?= cloud_is_enabled() ? 'true' : 'false' ?>;
 
-  btn.addEventListener('click', async function(){
-    if (!file.files || !file.files[0]) { st.textContent='Seleccioná una foto primero.'; return; }
-    st.textContent='Subiendo…';
-    btn.disabled = true;
-
-    const fd = new FormData();
-    fd.append('file', file.files[0]);
-
+  async function doUpload(){
+    if (!file.files || !file.files[0]) { return; }
     try{
-      const res = await fetch('?__ajax=cloud_upload', { method:'POST', body: fd });
+      const fd = new FormData();
+      fd.append('file', file.files[0]);
+      const res  = await fetch('?__ajax=cloud_upload', { method:'POST', body: fd });
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || 'Error al subir');
-      urlIn.value = data.url;    // ✅ completamos la URL segura
+      urlIn.value = data.url;
       prev.src = data.url;
       prevW.style.display = 'inline-block';
-      st.textContent = 'Listo ✔';
     }catch(e){
-      st.textContent = 'Error: '+e.message;
-    }finally{
-      btn.disabled = false;
+      alert('Error subiendo a Cloudinary: ' + e.message);
     }
-  });
+  }
+
+  if (file) {
+    file.addEventListener('change', function(){
+      if (!cloudEnabled) return;
+      doUpload();
+    });
+  }
 })();
 </script>
 </body>
