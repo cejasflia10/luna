@@ -30,6 +30,23 @@ if (!function_exists('envv')) {
 $db_ok = $has_conn && isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno;
 function hascol($t,$c){ global $conexion; $rs=@$conexion->query("SHOW COLUMNS FROM `$t` LIKE '$c'"); return ($rs && $rs->num_rows>0); }
 
+/* ===== settings: helper para leer ALIAS/CBU desde BD ===== */
+if (!function_exists('setting_get')) {
+  function setting_get($key){
+    global $conexion, $db_ok; if(!$db_ok) return null;
+    // Crear tabla si no existe (seguro y sin efectos si ya está)
+    @$conexion->query("CREATE TABLE IF NOT EXISTS `settings` (
+      `key` varchar(64) NOT NULL PRIMARY KEY,
+      `value` text NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $k = $conexion->real_escape_string($key);
+    $rs = @$conexion->query("SELECT `value` FROM `settings` WHERE `key`='$k' LIMIT 1");
+    if ($rs && $rs->num_rows>0){ $r=$rs->fetch_row(); return (string)$r[0]; }
+    return null;
+  }
+}
+
+/* ===== Detección de columnas ===== */
 $has_products      = $db_ok && ((@$conexion->query("SHOW TABLES LIKE 'products'")?->num_rows ?? 0) > 0);
 $has_variants      = $db_ok && ((@$conexion->query("SHOW TABLES LIKE 'product_variants'")?->num_rows ?? 0) > 0);
 $has_image_url     = $has_products && ((@$conexion->query("SHOW COLUMNS FROM products LIKE 'image_url'")?->num_rows ?? 0) > 0);
@@ -151,7 +168,7 @@ foreach ($cart as $k=>$row){
 $cart_count = array_sum(array_column($cart, 'qty'));
 $_SESSION['cart_count'] = $cart_count;
 
-/* ===== Totales simples (podés sumar envío, etc.) ===== */
+/* ===== Totales simples ===== */
 $method = $payment['method'] ?? 'efectivo';
 $cuotas = (int)($payment['installments'] ?? 1);
 $delivery_method = $payment['delivery_method'] ?? 'retirar';
@@ -159,14 +176,21 @@ $reserve72 = (int)($payment['reserve72'] ?? 0);
 $addr = $payment['address'] ?? ['fullname'=>'','phone'=>'','street'=>'','number'=>'','city'=>'','notes'=>''];
 $receipt_url = $payment['receipt_url'] ?? '';
 
-$fee = 0; $discount = 0; // personalizable según método
+$fee = 0; $discount = 0;
 $total = max(0,$subtotal + $fee - $discount);
 $cuota_monto = ($cuotas>1) ? ($total / $cuotas) : 0;
 
-/* ===== Alias/CBU para débito/transferencia ===== */
-$BANK_ALIAS = envv('BANK_ALIAS') ?: '';
-$BANK_CBU   = envv('BANK_CBU')   ?: '';
+/* ===== Alias/CBU (leer de BD primero; si no, ENV) ===== */
+$BANK_ALIAS = '';
+$BANK_CBU   = '';
+if ($db_ok) {
+  $BANK_ALIAS = setting_get('bank_alias') ?? '';
+  $BANK_CBU   = setting_get('bank_cbu')   ?? '';
+}
+if ($BANK_ALIAS==='') $BANK_ALIAS = envv('BANK_ALIAS') ?: '';
+if ($BANK_CBU==='')   $BANK_CBU   = envv('BANK_CBU')   ?: '';
 
+/* ===== Cloudinary para comprobantes ===== */
 $CLD_NAME   = envv('CLOUDINARY_CLOUD_NAME') ?: '';
 $CLD_PRESET = envv('CLOUDINARY_UPLOAD_PRESET') ?: '';
 $CLD_FOLDER = envv('CLOUDINARY_FOLDER') ?: 'luna-shop/comprobantes';
@@ -295,8 +319,12 @@ $header_path = $root.'/includes/header.php';
                 <!-- Bloque débito/transferencia -->
                 <div id="debitBlock" class="<?= ($method==='debito'?'':'hide') ?>" style="margin-top:10px">
                   <div class="pay-card" style="background:rgba(255,255,255,.02)">
-                    <div><b>Alias para transferir:</b> <?= $BANK_ALIAS ? '<code>'.h($BANK_ALIAS).'</code>' : '<span class="muted">Configurar BANK_ALIAS</span>' ?></div>
-                    <?php if ($BANK_CBU): ?><div style="margin-top:4px"><b>CBU:</b> <code><?= h($BANK_CBU) ?></code></div><?php endif; ?>
+                    <div><b>Alias para transferir:</b>
+                      <?= $BANK_ALIAS ? '<code>'.h($BANK_ALIAS).'</code>' : '<span class="muted">Configuralo en Admin (ALIAS)</span>' ?>
+                    </div>
+                    <?php if ($BANK_CBU): ?>
+                      <div style="margin-top:4px"><b>CBU:</b> <code><?= h($BANK_CBU) ?></code></div>
+                    <?php endif; ?>
                     <div class="muted" style="margin-top:6px">Adjuntá el comprobante de pago (foto/captura). Se valida al preparar el pedido.</div>
 
                     <div style="margin-top:8px">
