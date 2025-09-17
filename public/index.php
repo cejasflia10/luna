@@ -46,32 +46,44 @@ function coltype($table,$col){
   $c=db_cols($table); return strtolower($c[$col]['Type'] ?? '');
 }
 
-/* ========= Tabla settings (ALIAS/CBU) ========= */
-$sql_err = ''; // acumulamos errores visibles
+/* ========= settings: creación + compatibilidad (key/name) ========= */
+$sql_err = '';
+$SETTINGS_KEYCOL = 'name'; // estándar
 if ($db_ok) {
+  // Crear tabla con 'name' (no reservada). Si ya existe, no rompe.
   $sql_create = "CREATE TABLE IF NOT EXISTS `settings` (
-    `key`   varchar(64) NOT NULL PRIMARY KEY,
+    `name`  varchar(64) NOT NULL PRIMARY KEY,
     `value` text NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-  $okCreate = $conexion->query($sql_create);
-  if (!$okCreate) {
-    $sql_err .= 'Error creando tabla settings: '.$conexion->error;
+  if (!$conexion->query($sql_create)) {
+    $sql_err .= ($sql_err?' | ':'').'Error creando settings: '.$conexion->error;
+  }
+
+  // Detectar si existe la columna 'key' en instalaciones viejas
+  if (hascol('settings','key') && !hascol('settings','name')) {
+    $SETTINGS_KEYCOL = 'key';
+  } else {
+    $SETTINGS_KEYCOL = 'name';
   }
 }
+
+// helpers usando la columna detectada
 function setting_get($key){
-  global $conexion,$db_ok; if(!$db_ok) return null;
+  global $conexion,$db_ok,$SETTINGS_KEYCOL; if(!$db_ok) return null;
   $k = $conexion->real_escape_string($key);
-  $sql = "SELECT `value` FROM `settings` WHERE `key`='$k' LIMIT 1";
+  $col = ($SETTINGS_KEYCOL==='key') ? '`key`' : '`name`';
+  $sql = "SELECT `value` FROM `settings` WHERE $col='$k' LIMIT 1";
   $rs = $conexion->query($sql);
   if ($rs && $rs->num_rows>0) { $row=$rs->fetch_row(); return $row[0]; }
   return null;
 }
-/* Usamos INSERT ... ON DUPLICATE para evitar los efectos colaterales de REPLACE */
 function setting_set($key,$val,&$err=null){
-  global $conexion,$db_ok; if(!$db_ok){ $err='Sin conexión a BD'; return false; }
+  global $conexion,$db_ok,$SETTINGS_KEYCOL; if(!$db_ok){ $err='Sin conexión a BD'; return false; }
   $k = $conexion->real_escape_string($key);
   $v = $conexion->real_escape_string($val);
-  $sql = "INSERT INTO `settings` (`key`,`value`) VALUES ('$k','$v')
+  $col = ($SETTINGS_KEYCOL==='key') ? '`key`' : '`name`';
+  // INSERT ... ON DUPLICATE (más seguro que REPLACE)
+  $sql = "INSERT INTO `settings` ($col,`value`) VALUES ('$k','$v')
           ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)";
   $ok = $conexion->query($sql);
   if (!$ok) { $err = $conexion->error ?: 'Fallo query'; }
@@ -83,23 +95,29 @@ if (!isset($_SESSION['flash'])) $_SESSION['flash']=[];
 function flash_set($k,$v){ $_SESSION['flash'][$k]=$v; }
 function flash_get($k){ $v=$_SESSION['flash'][$k]??''; unset($_SESSION['flash'][$k]); return $v; }
 
-/* ========= Guardar ALIAS/CBU (SIN PIN) ========= */
+/* ========= Guardar Datos Bancarios (SIN PIN) ========= */
 if (($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && ($_POST['action'] ?? '')==='save_bank') {
   if (!$db_ok) {
     flash_set('err_bank','No hay conexión a la base de datos.');
   } else {
-    $alias = trim($_POST['bank_alias'] ?? '');
-    $cbu   = trim($_POST['bank_cbu'] ?? '');
-    if ($alias==='' && $cbu==='') {
-      flash_set('err_bank','Cargá al menos ALIAS o CBU.');
+    $holder = trim($_POST['bank_holder'] ?? '');   // Titular
+    $bname  = trim($_POST['bank_name'] ?? '');     // Banco
+    $alias  = trim($_POST['bank_alias'] ?? '');    // Alias
+    $cbu    = trim($_POST['bank_cbu'] ?? '');      // CBU
+
+    if ($holder==='' && $bname==='' && $alias==='' && $cbu==='') {
+      flash_set('err_bank','Cargá al menos un dato (Titular, Banco, Alias o CBU).');
     } else {
-      $err1 = $err2 = null;
-      $ok1 = ($alias!=='' ? setting_set('bank_alias',$alias,$err1) : true);
-      $ok2 = ($cbu!==''   ? setting_set('bank_cbu',$cbu,$err2)     : true);
-      if ($ok1 && $ok2) {
+      $e1=$e2=$e3=$e4=null;
+      $ok1 = ($holder!=='' ? setting_set('bank_holder',$holder,$e1) : true);
+      $ok2 = ($bname !=='' ? setting_set('bank_name',$bname,$e2)   : true);
+      $ok3 = ($alias !=='' ? setting_set('bank_alias',$alias,$e3)   : true);
+      $ok4 = ($cbu   !=='' ? setting_set('bank_cbu',$cbu,$e4)       : true);
+
+      if ($ok1 && $ok2 && $ok3 && $ok4) {
         flash_set('ok_bank','Datos bancarios guardados.');
       } else {
-        $detalle = trim(($err1?:'').' '.($err2?:''));
+        $detalle = trim(($e1?:'').' '.($e2?:'').' '.($e3?:'').' '.($e4?:''));
         flash_set('err_bank','No se pudo guardar (verificá permisos/BD). '.$detalle);
       }
     }
@@ -108,8 +126,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && ($_POST['action'] ?? '')==='s
 }
 
 /* ========= Leer valores actuales ========= */
-$BANK_ALIAS = $db_ok ? (setting_get('bank_alias') ?? '') : '';
-$BANK_CBU   = $db_ok ? (setting_get('bank_cbu')   ?? '') : '';
+$BANK_HOLDER = $db_ok ? (setting_get('bank_holder') ?? '') : '';
+$BANK_NAME   = $db_ok ? (setting_get('bank_name')   ?? '') : '';
+$BANK_ALIAS  = $db_ok ? (setting_get('bank_alias')  ?? '') : '';
+$BANK_CBU    = $db_ok ? (setting_get('bank_cbu')    ?? '') : '';
 
 $ok_bank  = flash_get('ok_bank');
 $err_bank = flash_get('err_bank');
@@ -280,8 +300,8 @@ $rot_words = [
 
   <?php if (file_exists($header_path)) { require $header_path; } ?>
 
-  <!-- AVISO: Compras online sin confirmar -->
   <div class="container">
+    <!-- AVISO: Compras online sin confirmar -->
     <?php if ($pending_count>0): ?>
       <div class="info">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
@@ -358,7 +378,7 @@ $rot_words = [
     <!-- ======= CONFIGURACIÓN ALIAS/CBU (SIN PIN) ======= -->
     <section id="conf-banco" class="card" style="margin:14px 0">
       <div class="p">
-        <h2 style="margin:.2rem 0 .6rem">💳 Configurar ALIAS / CBU</h2>
+        <h2 style="margin:.2rem 0 .6rem">💳 Configurar datos bancarios</h2>
 
         <?php if (!empty($ok_bank)): ?>
           <div class="badge" style="border-color:#22c55e;color:#22c55e">✔ <?= h($ok_bank) ?></div>
@@ -369,16 +389,26 @@ $rot_words = [
 
         <form action="<?= h($_SERVER['PHP_SELF'] ?? 'index.php') ?>#conf-banco" method="post" style="display:grid;gap:8px;max-width:560px;margin-top:8px">
           <input type="hidden" name="action" value="save_bank">
-          <label>ALIAS
+
+          <label>Titular (Nombre y Apellido)
+            <input class="input" name="bank_holder" value="<?= h($BANK_HOLDER ?? '') ?>" placeholder="Ej: María González">
+          </label>
+          <label>Banco
+            <input class="input" name="bank_name" value="<?= h($BANK_NAME ?? '') ?>" placeholder="Ej: Banco Nación">
+          </label>
+          <label>Alias
             <input class="input" name="bank_alias" value="<?= h($BANK_ALIAS ?? '') ?>" placeholder="mi.alias.banco">
           </label>
           <label>CBU
-            <input class="input" name="bank_cbu" value="<?= h($BANK_CBU ?? '') ?>" placeholder="#########">
+            <input class="input" name="bank_cbu" value="<?= h($BANK_CBU ?? '') ?>" placeholder="########################">
           </label>
+
           <div>
             <button class="cta" type="submit">💾 Guardar</button>
           </div>
-          <div class="badge" style="opacity:.8">Estos datos se guardan en la tabla <code>settings</code> de la base.</div>
+          <div class="badge" style="opacity:.8">
+            Se guarda en la tabla <code>settings</code>. Compatible con esquemas viejos (<code>key/value</code>).
+          </div>
         </form>
       </div>
     </section>

@@ -30,17 +30,22 @@ if (!function_exists('envv')) {
 $db_ok = $has_conn && isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno;
 function hascol($t,$c){ global $conexion; $rs=@$conexion->query("SHOW COLUMNS FROM `$t` LIKE '$c'"); return ($rs && $rs->num_rows>0); }
 
-/* ===== settings: helper para leer ALIAS/CBU desde BD ===== */
+/* ===== settings: helper para leer desde BD ===== */
 if (!function_exists('setting_get')) {
   function setting_get($key){
     global $conexion, $db_ok; if(!$db_ok) return null;
-    // Crear tabla si no existe (seguro y sin efectos si ya está)
+    // Crear tabla si no existe (seguro)
     @$conexion->query("CREATE TABLE IF NOT EXISTS `settings` (
-      `key` varchar(64) NOT NULL PRIMARY KEY,
+      `name` varchar(64) NOT NULL PRIMARY KEY,
       `value` text NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    // Compatibilidad si tu tabla vieja usa `key`
+    $col = 'name';
+    $chk = @$conexion->query("SHOW COLUMNS FROM `settings` LIKE 'key'");
+    if ($chk && $chk->num_rows>0) $col = 'key';
+
     $k = $conexion->real_escape_string($key);
-    $rs = @$conexion->query("SELECT `value` FROM `settings` WHERE `key`='$k' LIMIT 1");
+    $rs = @$conexion->query("SELECT `value` FROM `settings` WHERE `$col`='$k' LIMIT 1");
     if ($rs && $rs->num_rows>0){ $r=$rs->fetch_row(); return (string)$r[0]; }
     return null;
   }
@@ -180,15 +185,25 @@ $fee = 0; $discount = 0;
 $total = max(0,$subtotal + $fee - $discount);
 $cuota_monto = ($cuotas>1) ? ($total / $cuotas) : 0;
 
-/* ===== Alias/CBU (leer de BD primero; si no, ENV) ===== */
-$BANK_ALIAS = '';
-$BANK_CBU   = '';
+/* ===== Datos bancarios: Titular, Banco, Alias, CBU =====
+   1) Busca en tabla settings: bank_holder, bank_name/bank_bank, bank_alias, bank_cbu
+   2) Si no están, usa variables de entorno: BANK_HOLDER/BANK_TITULAR, BANK_NAME/BANK_BANK, BANK_ALIAS, BANK_CBU
+*/
+$BANK_HOLDER = '';
+$BANK_BANK   = '';
+$BANK_ALIAS  = '';
+$BANK_CBU    = '';
+
 if ($db_ok) {
-  $BANK_ALIAS = setting_get('bank_alias') ?? '';
-  $BANK_CBU   = setting_get('bank_cbu')   ?? '';
+  $BANK_HOLDER = setting_get('bank_holder') ?? setting_get('bank_titular') ?? '';
+  $BANK_BANK   = setting_get('bank_name')   ?? setting_get('bank_bank')    ?? '';
+  $BANK_ALIAS  = setting_get('bank_alias')  ?? '';
+  $BANK_CBU    = setting_get('bank_cbu')    ?? '';
 }
-if ($BANK_ALIAS==='') $BANK_ALIAS = envv('BANK_ALIAS') ?: '';
-if ($BANK_CBU==='')   $BANK_CBU   = envv('BANK_CBU')   ?: '';
+if ($BANK_HOLDER==='') $BANK_HOLDER = envv('BANK_HOLDER') ?: envv('BANK_TITULAR') ?: '';
+if ($BANK_BANK  ==='') $BANK_BANK   = envv('BANK_NAME')   ?: envv('BANK_BANK')    ?: '';
+if ($BANK_ALIAS ==='') $BANK_ALIAS  = envv('BANK_ALIAS')  ?: '';
+if ($BANK_CBU   ==='') $BANK_CBU    = envv('BANK_CBU')    ?: '';
 
 /* ===== Cloudinary para comprobantes ===== */
 $CLD_NAME   = envv('CLOUDINARY_CLOUD_NAME') ?: '';
@@ -222,6 +237,8 @@ $header_path = $root.'/includes/header.php';
     .hide{display:none}
     .ok{color:#22c55e}
     .err{color:#ef4444}
+    .kv{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+    .kv code{padding:.08rem .35rem;border:1px solid var(--ring);border-radius:.35rem}
   </style>
 </head>
 <body>
@@ -319,13 +336,20 @@ $header_path = $root.'/includes/header.php';
                 <!-- Bloque débito/transferencia -->
                 <div id="debitBlock" class="<?= ($method==='debito'?'':'hide') ?>" style="margin-top:10px">
                   <div class="pay-card" style="background:rgba(255,255,255,.02)">
-                    <div><b>Alias para transferir:</b>
-                      <?= $BANK_ALIAS ? '<code>'.h($BANK_ALIAS).'</code>' : '<span class="muted">Configuralo en Admin (ALIAS)</span>' ?>
+                    <div class="kv"><b>Titular:</b>
+                      <?= $BANK_HOLDER ? h($BANK_HOLDER) : '<span class="muted">Configurar titular</span>' ?>
                     </div>
-                    <?php if ($BANK_CBU): ?>
-                      <div style="margin-top:4px"><b>CBU:</b> <code><?= h($BANK_CBU) ?></code></div>
-                    <?php endif; ?>
-                    <div class="muted" style="margin-top:6px">Adjuntá el comprobante de pago (foto/captura). Se valida al preparar el pedido.</div>
+                    <div class="kv" style="margin-top:4px"><b>Banco:</b>
+                      <?= $BANK_BANK ? h($BANK_BANK) : '<span class="muted">Configurar banco</span>' ?>
+                    </div>
+                    <div class="kv" style="margin-top:4px"><b>Alias:</b>
+                      <?= $BANK_ALIAS ? '<code>'.h($BANK_ALIAS).'</code>' : '<span class="muted">Configurar ALIAS</span>' ?>
+                    </div>
+                    <div class="kv" style="margin-top:4px"><b>CBU:</b>
+                      <?= $BANK_CBU ? '<code>'.h($BANK_CBU).'</code>' : '<span class="muted">Configurar CBU</span>' ?>
+                    </div>
+
+                    <div class="muted" style="margin-top:8px">Adjuntá el comprobante de pago (foto/captura). Se valida al preparar el pedido.</div>
 
                     <div style="margin-top:8px">
                       <input type="file" id="receipt_file" accept="image/*">
