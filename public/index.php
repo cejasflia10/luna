@@ -62,12 +62,19 @@ $__SET_ERR = '';
 function settings_last_error(){ global $__SET_ERR; return $__SET_ERR; }
 function settings_set_error($msg){ global $__SET_ERR; $__SET_ERR = $msg; }
 
-/* Crea la tabla settings si no existe, con la columna elegida (key|name) como PK */
-function settings_ensure_table_exists($prefer='key'){
+/* ¿Existe la tabla settings? */
+function settings_table_exists(){
   global $conexion, $db_ok; if(!$db_ok) return false;
-  $col = in_array($prefer,['key','name'], true) ? $prefer : 'key';
-  $sql = "CREATE TABLE IF NOT EXISTS `settings` (
-    `".$col."` varchar(64) NOT NULL PRIMARY KEY,
+  $rs = @$conexion->query("SHOW TABLES LIKE 'settings'");
+  return ($rs && $rs->num_rows>0);
+}
+
+/* Asegura la tabla settings (por defecto con columna name como PK, para evitar palabra reservada KEY) */
+function settings_ensure_table(){
+  global $conexion, $db_ok; if(!$db_ok) return false;
+  if (settings_table_exists()) return true;
+  $sql = "CREATE TABLE `settings` (
+    `name`  varchar(64) NOT NULL PRIMARY KEY,
     `value` text NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
   $ok = @$conexion->query($sql);
@@ -75,24 +82,28 @@ function settings_ensure_table_exists($prefer='key'){
   return (bool)$ok;
 }
 
-/* Detecta si la tabla usa columna name o key; si no existe, la crea con key */
-function settings_pick_col(){
-  global $conexion, $db_ok; if(!$db_ok) return 'key';
-  $rs = @$conexion->query("SELECT `name` FROM `settings` LIMIT 0");
-  if ($rs !== false) return 'name';
-  $rs = @$conexion->query("SELECT `key` FROM `settings` LIMIT 0");
-  if ($rs !== false) return 'key';
-  // Crear con key por defecto
-  settings_ensure_table_exists('key');
-  $rs2 = @$conexion->query("SELECT `key` FROM `settings` LIMIT 0");
-  if ($rs2 !== false) return 'key';
-  return 'key';
+/* Detecta cuál columna se usa como clave: name o key */
+function settings_detect_col(){
+  global $conexion, $db_ok; if(!$db_ok) return 'name';
+  // Si no existe la tabla, la creo con 'name'
+  if (!settings_table_exists()) {
+    settings_ensure_table();
+    return 'name';
+  }
+  // Detectar por SHOW COLUMNS (más fiable que SELECT)
+  $has_name = hascol('settings','name');
+  $has_key  = hascol('settings','key');
+  if ($has_name) return 'name';
+  if ($has_key)  return 'key';
+  // Caso raro: la tabla existe pero no tiene ninguna de las dos columnas
+  settings_set_error("La tabla `settings` no tiene columnas `name` ni `key`.");
+  return 'name'; // devolvemos 'name' para que al menos falle de forma consistente
 }
 
-/* Lee un valor */
+/* Leer un valor */
 function setting_get($key){
   global $conexion, $db_ok; if(!$db_ok) return null;
-  $col = settings_pick_col();
+  $col = settings_detect_col();
   $k   = $conexion->real_escape_string($key);
   $sql = "SELECT `value` FROM `settings` WHERE `$col`='$k' LIMIT 1";
   $rs  = @$conexion->query($sql);
@@ -100,16 +111,14 @@ function setting_get($key){
   return null;
 }
 
-/* Guarda (UPSERT) un valor — evita “Duplicate entry … for key PRIMARY” */
+/* Guardar (UPSERT). Si hay PK UNIQUE sobre `name` o `key`, funciona bien */
 function setting_set($key,$val){
   global $conexion, $db_ok; if(!$db_ok){ settings_set_error('Sin conexión a BD'); return false; }
-  // Aseguramos la tabla (por si no existe)
-  if (!settings_ensure_table_exists('key')) {
-    // Si falla create, igual intentaremos por si ya existe con 'name'
-  }
-  $col = settings_pick_col();
-  $sql = "INSERT INTO `settings` (`$col`,`value`) VALUES (?,?)
-          ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)";
+  if (!settings_ensure_table()) { return false; }
+  $col  = settings_detect_col();
+  // Si la tabla existente usa `key`, también funciona (está entre backticks)
+  $sql  = "INSERT INTO `settings` (`$col`,`value`) VALUES (?,?)
+           ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)";
   $stmt = @$conexion->prepare($sql);
   if (!$stmt){ settings_set_error("prepare UPSERT ($col): ".$conexion->error); return false; }
   $stmt->bind_param('ss', $key, $val);
@@ -143,7 +152,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && ($_POST['action'] ?? '')==='s
       if ($holder !=='') $oks[] = setting_set('bank_holder',$holder);
       if ($bank   !=='') $oks[] = setting_set('bank_name',$bank);
 
-      /* Compatibilidad con llaves antiguas (por si ya las usabas) */
+      /* Compatibilidad con llaves antiguas (si ya existían) */
       if ($alias  !=='') $oks[] = setting_set('alias',$alias);
       if ($bank   !=='') $oks[] = setting_set('banco',$bank);
       if ($holder !=='') $oks[] = setting_set('bank_titular',$holder);
@@ -432,7 +441,7 @@ $rot_words = [
           <div>
             <button class="cta" type="submit">💾 Guardar</button>
           </div>
-          <div class="badge" style="opacity:.8">Se guarda en la tabla <code>settings</code> (usa <code>name</code> o <code>key</code> — la que exista; si no existe, se crea automáticamente).</div>
+          <div class="badge" style="opacity:.8">Se guarda en la tabla <code>settings</code> (detecta si usa <code>name</code> o <code>key</code> y hace UPSERT).</div>
 
           <?php if($BANK_HOLDER || $BANK_NAME || $BANK_ALIAS || $BANK_CBU): ?>
             <div style="margin-top:8px">
