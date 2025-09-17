@@ -15,7 +15,4 @@ services:
       # - { key: MYSQLDATABASE, sync: false }
       # - { key: MYSQLUSER,     sync: false }
       # - { key: MYSQLPASSWORD, sync: false }
-    disks:
-      - name: uploads
-        mountPath: /var/www/html/public/uploads
-        sizeGB: 2
+  
