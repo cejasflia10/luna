@@ -17,7 +17,7 @@ $PUBLIC_BASE = (preg_match('~/(clientes)(/|$)~', $dir)) ? rtrim(dirname($dir), '
 if (!function_exists('url_public')) { function url_public($path){ global $PUBLIC_BASE; $b=rtrim($PUBLIC_BASE,'/'); return ($b===''?'':$b).'/'.ltrim((string)$path,'/'); } }
 if (!function_exists('urlc')) { function urlc($p){ return url_public('clientes/'.ltrim((string)$p,'/')); } }
 
-/* ===== Env helper (simple) ===== */
+/* ===== Env helper ===== */
 if (!function_exists('envv')) {
   function envv($k){
     if (isset($_ENV[$k]) && $_ENV[$k] !== '') return $_ENV[$k];
@@ -30,23 +30,33 @@ if (!function_exists('envv')) {
 $db_ok = $has_conn && isset($conexion) && $conexion instanceof mysqli && !$conexion->connect_errno;
 function hascol($t,$c){ global $conexion; $rs=@$conexion->query("SHOW COLUMNS FROM `$t` LIKE '$c'"); return ($rs && $rs->num_rows>0); }
 
-/* ===== settings: helper para leer desde BD ===== */
-if (!function_exists('setting_get')) {
-  function setting_get($key){
+/* ===== settings helpers ===== */
+if (!function_exists('setting__which_col')) {
+  function setting__which_col(){
     global $conexion, $db_ok; if(!$db_ok) return null;
-    // Crear tabla si no existe (seguro)
     @$conexion->query("CREATE TABLE IF NOT EXISTS `settings` (
       `name` varchar(64) NOT NULL PRIMARY KEY,
       `value` text NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-    // Compatibilidad si tu tabla vieja usa `key`
     $col = 'name';
     $chk = @$conexion->query("SHOW COLUMNS FROM `settings` LIKE 'key'");
     if ($chk && $chk->num_rows>0) $col = 'key';
-
+    return $col;
+  }
+}
+if (!function_exists('setting_get')) {
+  function setting_get($key){
+    global $conexion, $db_ok; if(!$db_ok) return null;
+    $col = setting__which_col(); if(!$col) return null;
     $k = $conexion->real_escape_string($key);
     $rs = @$conexion->query("SELECT `value` FROM `settings` WHERE `$col`='$k' LIMIT 1");
     if ($rs && $rs->num_rows>0){ $r=$rs->fetch_row(); return (string)$r[0]; }
+    return null;
+  }
+}
+if (!function_exists('setting_get_many')) {
+  function setting_get_many(array $keys){
+    foreach($keys as $k){ $v = setting_get($k); if($v!==null && $v!=='') return $v; }
     return null;
   }
 }
@@ -101,10 +111,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
   } elseif ($action === 'clear') {
     $cart = [];
   } elseif ($action === 'set_payment') {
-    // Método y cuotas
     $m = $_POST['method'] ?? 'efectivo';
     $cuotas = isset($_POST['installments']) ? max(1,(int)$_POST['installments']) : 1;
-    // Entrega
     $delivery = $_POST['delivery_method'] ?? 'retirar'; // retirar | envio
     $reserve72 = isset($_POST['reserve72']) ? 1 : 0;
     $addr = [
@@ -115,16 +123,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
       'city'    =>trim($_POST['addr_city'] ?? ''),
       'notes'   =>trim($_POST['addr_notes'] ?? ''),
     ];
-    // Comprobante (URL ya subida por JS si se usó Cloudinary)
     $receipt_url = trim($_POST['receipt_url'] ?? '');
-
     $payment = [
-      'method'=>$m,
-      'installments'=>$cuotas,
-      'delivery_method'=>$delivery,
-      'reserve72'=>$reserve72,
-      'address'=>$addr,
-      'receipt_url'=>$receipt_url
+      'method'=>$m, 'installments'=>$cuotas, 'delivery_method'=>$delivery,
+      'reserve72'=>$reserve72, 'address'=>$addr, 'receipt_url'=>$receipt_url
     ];
   }
   $_SESSION['cart_count'] = array_sum(array_column($cart, 'qty'));
@@ -173,7 +175,7 @@ foreach ($cart as $k=>$row){
 $cart_count = array_sum(array_column($cart, 'qty'));
 $_SESSION['cart_count'] = $cart_count;
 
-/* ===== Totales simples ===== */
+/* ===== Totales ===== */
 $method = $payment['method'] ?? 'efectivo';
 $cuotas = (int)($payment['installments'] ?? 1);
 $delivery_method = $payment['delivery_method'] ?? 'retirar';
@@ -185,25 +187,26 @@ $fee = 0; $discount = 0;
 $total = max(0,$subtotal + $fee - $discount);
 $cuota_monto = ($cuotas>1) ? ($total / $cuotas) : 0;
 
-/* ===== Datos bancarios: Titular, Banco, Alias, CBU =====
-   1) Busca en tabla settings: bank_holder, bank_name/bank_bank, bank_alias, bank_cbu
-   2) Si no están, usa variables de entorno: BANK_HOLDER/BANK_TITULAR, BANK_NAME/BANK_BANK, BANK_ALIAS, BANK_CBU
-*/
-$BANK_HOLDER = '';
-$BANK_BANK   = '';
+/* ===== Datos bancarios: probar varias claves y env ===== */
 $BANK_ALIAS  = '';
 $BANK_CBU    = '';
+$BANK_HOLDER = '';
+$BANK_BANK   = '';
 
 if ($db_ok) {
-  $BANK_HOLDER = setting_get('bank_holder') ?? setting_get('bank_titular') ?? '';
-  $BANK_BANK   = setting_get('bank_name')   ?? setting_get('bank_bank')    ?? '';
-  $BANK_ALIAS  = setting_get('bank_alias')  ?? '';
-  $BANK_CBU    = setting_get('bank_cbu')    ?? '';
+  // alias: bank_alias | alias | alias_banco
+  $BANK_ALIAS  = setting_get_many(['bank_alias','alias','alias_banco']) ?? '';
+  // cbu: bank_cbu | cbu
+  $BANK_CBU    = setting_get_many(['bank_cbu','cbu']) ?? '';
+  // titular: bank_holder | bank_titular | titular
+  $BANK_HOLDER = setting_get_many(['bank_holder','bank_titular','titular']) ?? '';
+  // banco: bank_name | bank_bank | banco
+  $BANK_BANK   = setting_get_many(['bank_name','bank_bank','banco']) ?? '';
 }
-if ($BANK_HOLDER==='') $BANK_HOLDER = envv('BANK_HOLDER') ?: envv('BANK_TITULAR') ?: '';
-if ($BANK_BANK  ==='') $BANK_BANK   = envv('BANK_NAME')   ?: envv('BANK_BANK')    ?: '';
-if ($BANK_ALIAS ==='') $BANK_ALIAS  = envv('BANK_ALIAS')  ?: '';
-if ($BANK_CBU   ==='') $BANK_CBU    = envv('BANK_CBU')    ?: '';
+if ($BANK_ALIAS  ==='') $BANK_ALIAS  = envv('BANK_ALIAS')  ?: '';
+if ($BANK_CBU    ==='') $BANK_CBU    = envv('BANK_CBU')    ?: '';
+if ($BANK_HOLDER ==='') $BANK_HOLDER = (envv('BANK_HOLDER') ?: envv('BANK_TITULAR')) ?: '';
+if ($BANK_BANK   ==='') $BANK_BANK   = (envv('BANK_NAME')   ?: envv('BANK_BANK'))    ?: '';
 
 /* ===== Cloudinary para comprobantes ===== */
 $CLD_NAME   = envv('CLOUDINARY_CLOUD_NAME') ?: '';
@@ -434,7 +437,6 @@ $header_path = $root.'/includes/header.php';
 <?php else: ?>
 <script>
 (function(){
-  // Aun sin Cloudinary, mostrar/ocultar bloques para que el flujo siga
   const form = document.getElementById('payForm');
   const radiosDelivery = form.querySelectorAll('input[name="delivery_method"]');
   const addrWrap = document.getElementById('addrWrap');
