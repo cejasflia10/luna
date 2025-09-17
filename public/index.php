@@ -47,26 +47,35 @@ function coltype($table,$col){
 }
 
 /* ========= Tabla settings (ALIAS/CBU) ========= */
+$sql_err = ''; // acumulamos errores visibles
 if ($db_ok) {
-  @$conexion->query("CREATE TABLE IF NOT EXISTS `settings` (
+  $sql_create = "CREATE TABLE IF NOT EXISTS `settings` (
     `key`   varchar(64) NOT NULL PRIMARY KEY,
     `value` text NULL
-  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+  $okCreate = $conexion->query($sql_create);
+  if (!$okCreate) {
+    $sql_err .= 'Error creando tabla settings: '.$conexion->error;
+  }
 }
 function setting_get($key){
   global $conexion,$db_ok; if(!$db_ok) return null;
   $k = $conexion->real_escape_string($key);
   $sql = "SELECT `value` FROM `settings` WHERE `key`='$k' LIMIT 1";
-  $rs = @$conexion->query($sql);
+  $rs = $conexion->query($sql);
   if ($rs && $rs->num_rows>0) { $row=$rs->fetch_row(); return $row[0]; }
   return null;
 }
-function setting_set($key,$val){
-  global $conexion,$db_ok; if(!$db_ok) return false;
+/* Usamos INSERT ... ON DUPLICATE para evitar los efectos colaterales de REPLACE */
+function setting_set($key,$val,&$err=null){
+  global $conexion,$db_ok; if(!$db_ok){ $err='Sin conexión a BD'; return false; }
   $k = $conexion->real_escape_string($key);
   $v = $conexion->real_escape_string($val);
-  $sql = "REPLACE INTO `settings` (`key`,`value`) VALUES ('$k','$v')";
-  return !!@$conexion->query($sql);
+  $sql = "INSERT INTO `settings` (`key`,`value`) VALUES ('$k','$v')
+          ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)";
+  $ok = $conexion->query($sql);
+  if (!$ok) { $err = $conexion->error ?: 'Fallo query'; }
+  return !!$ok;
 }
 
 /* ========= Flash msgs ========= */
@@ -84,10 +93,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '')==='POST' && ($_POST['action'] ?? '')==='s
     if ($alias==='' && $cbu==='') {
       flash_set('err_bank','Cargá al menos ALIAS o CBU.');
     } else {
-      $ok1 = ($alias!=='' ? setting_set('bank_alias',$alias) : true);
-      $ok2 = ($cbu!==''   ? setting_set('bank_cbu',$cbu)     : true);
-      if ($ok1 && $ok2) flash_set('ok_bank','Datos bancarios guardados.');
-      else flash_set('err_bank','No se pudo guardar (verificá permisos/BD).');
+      $err1 = $err2 = null;
+      $ok1 = ($alias!=='' ? setting_set('bank_alias',$alias,$err1) : true);
+      $ok2 = ($cbu!==''   ? setting_set('bank_cbu',$cbu,$err2)     : true);
+      if ($ok1 && $ok2) {
+        flash_set('ok_bank','Datos bancarios guardados.');
+      } else {
+        $detalle = trim(($err1?:'').' '.($err2?:''));
+        flash_set('err_bank','No se pudo guardar (verificá permisos/BD). '.$detalle);
+      }
     }
   }
   header('Location: '.( $_SERVER['PHP_SELF'] ?? 'index.php' ).'#conf-banco'); exit;
@@ -103,7 +117,7 @@ $err_bank = flash_get('err_bank');
 /* ========= Productos (para Novedades) ========= */
 $has_products=$has_variants=$has_categories_table=false;
 $has_image_url=$has_created_at=$has_category_id=$has_variant_price=false;
-$sql_err=''; $prods=null;
+$prods=null;
 
 if ($db_ok) {
   $t1=@$conexion->query("SHOW TABLES LIKE 'products'");         $has_products=($t1 && $t1->num_rows>0);
@@ -126,7 +140,7 @@ if ($db_ok) {
     $order = $has_created_at ? "p.created_at DESC" : "p.id DESC";
     $sql = "SELECT $select FROM products p WHERE p.active=1 ORDER BY $order LIMIT 12";
     $prods = @$conexion->query($sql);
-    if ($prods===false) $sql_err=$conexion->error;
+    if ($prods===false) $sql_err .= ($sql_err? ' | ' : '').$conexion->error;
   }
 }
 
@@ -303,6 +317,12 @@ $rot_words = [
         <div style="opacity:.8;margin-top:6px">Tip: marcá la venta como <i>pagado/completada</i> desde “Ventas”. Si no se confirma dentro de 24h (y tenés reservas activas), el stock se libera solo.</div>
       </div>
     <?php endif; ?>
+
+    <?php if($sql_err): ?>
+      <div class="info" style="border-color:#7f1d1d;background:#2a1515">
+        <b>❌ Error SQL:</b> <?= h($sql_err) ?>
+      </div>
+    <?php endif; ?>
   </div>
 
   <!-- HERO -->
@@ -335,12 +355,6 @@ $rot_words = [
   </header>
 
   <main class="container">
-    <?php if($sql_err): ?>
-      <div class="card" style="padding:14px"><div class="p">
-        <b>❌ Error SQL:</b> <?= h($sql_err) ?>
-      </div></div>
-    <?php endif; ?>
-
     <!-- ======= CONFIGURACIÓN ALIAS/CBU (SIN PIN) ======= -->
     <section id="conf-banco" class="card" style="margin:14px 0">
       <div class="p">
